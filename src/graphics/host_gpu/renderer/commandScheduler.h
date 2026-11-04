@@ -81,6 +81,9 @@ private:
 	};
 
 	void BeginNext();
+	void WriteStartTimestamp();
+	void WriteEndTimestamp();
+	void ReadTimestamps(uint32_t slot);
 	void PriorityOperationsThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
@@ -98,6 +101,12 @@ private:
 	std::jthread                 m_priority_thread;
 	uint64_t                     m_priority_active_tick = 0; // 0 while none runs
 	OperationState               m_operation_state      = OperationState::Open;
+	// BenchStats only: a begin and end timestamp per command buffer.
+	static constexpr uint32_t TimestampSlots = 4096;
+	vk::QueryPool             m_timestamp_pool = nullptr;
+	uint32_t                  m_timestamp_next = 0;
+	uint32_t                  m_timestamp_slot = UINT32_MAX;
+	uint64_t                  m_gpu_last_end   = 0;
 };
 
 } // namespace Libs::Graphics

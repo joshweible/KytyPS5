@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/benchStats.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -299,12 +300,60 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
 	m_dynamic_state.Invalidate();
+	if (BenchStats::Enabled()) {
+		WriteStartTimestamp();
+	}
 	return m_command;
+}
+
+void CommandScheduler::WriteStartTimestamp() {
+	if (m_timestamp_pool == nullptr) {
+		vk::QueryPoolCreateInfo info {};
+		info.queryType  = vk::QueryType::eTimestamp;
+		info.queryCount = TimestampSlots * 2;
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.createQueryPool(&info, nullptr, &m_timestamp_pool) !=
+		                     vk::Result::eSuccess);
+	}
+	m_timestamp_slot = m_timestamp_next++ % TimestampSlots;
+	m_command.m_buffer.resetQueryPool(m_timestamp_pool, m_timestamp_slot * 2, 2);
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, m_timestamp_pool,
+	                                  m_timestamp_slot * 2);
+}
+
+void CommandScheduler::WriteEndTimestamp() {
+	const auto slot  = m_timestamp_slot;
+	m_timestamp_slot = UINT32_MAX;
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_timestamp_pool,
+	                                  slot * 2 + 1);
+	// Runs once the buffer's tick completes, in tick order.
+	std::lock_guard lock(m_operation_mutex);
+	m_pending_operations.push({[this, slot] { ReadTimestamps(slot); }, CurrentTick()});
+}
+
+void CommandScheduler::ReadTimestamps(uint32_t slot) {
+	uint64_t   values[2] = {};
+	const auto result    = m_graphics.device.getQueryPoolResults(
+        m_timestamp_pool, slot * 2, 2, sizeof(values), values, sizeof(uint64_t),
+        vk::QueryResultFlagBits::e64);
+	if (result != vk::Result::eSuccess || values[1] < values[0]) {
+		return;
+	}
+	const double period = m_graphics.GetPhysicalDeviceProperties().limits.timestampPeriod;
+	const auto   to_ns  = [period](uint64_t ticks) {
+        return static_cast<uint64_t>(static_cast<double>(ticks) * period);
+	};
+	const uint64_t gap = m_gpu_last_end != 0 && values[0] > m_gpu_last_end ? values[0] - m_gpu_last_end : 0u;
+	const uint64_t from = std::max(values[0], m_gpu_last_end);
+	BenchStats::AddGpuTime(values[1] > from ? to_ns(values[1] - from) : 0u, to_ns(gap));
+	m_gpu_last_end = std::max(m_gpu_last_end, values[1]);
 }
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 
+	if (m_timestamp_slot != UINT32_MAX) {
+		WriteEndTimestamp();
+	}
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
