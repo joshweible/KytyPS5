@@ -1022,6 +1022,11 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		} else if (image.numeric_class == Prospero::TextureNumericClass::Unsupported ||
 		           (base.depth_compare &&
 		            image.numeric_class != Prospero::TextureNumericClass::Float)) {
+			if (image.indirect_root != ImageResource::NoIndirectImage) {
+				// A table entry that is not an image: see the candidate check below.
+				snapshot.images[i].dwords.fill(0);
+				continue;
+			}
 			auto message = fmt::format(
 			    "sampled image descriptor {} uses unsupported format {}: root={} source={} "
 			    "first_use_pc={:#x} r128={} words={:08x},{:08x},{:08x},{:08x},"
@@ -1145,9 +1150,15 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			     !unfiltered_coordinates && !prefix_coordinates) ||
 			    image.conversion_format != image_class.conversion_format ||
 			    (!storage_swizzle && image.shader_swizzle != image_class.shader_swizzle)) {
-				return SpecializationFail(
-				    fmt::format("indirect image table at pc 0x{:08x} has incompatible candidates",
-				                program.info.images[root_index].first_use_pc));
+				// Tables also hold non-image data the shader never selects (floats, for one). Such an
+				// entry reads as an empty slot rather than losing the whole shader.
+				snapshot.images[candidate].dwords.fill(0);
+				image.numeric_class     = image_class.numeric_class;
+				image.dimension         = image_class.dimension;
+				image.mip_count         = image_class.mip_count;
+				image.conversion_format = image_class.conversion_format;
+				image.shader_swizzle    = image_class.shader_swizzle;
+				image.cube              = image_class.cube;
 			}
 		}
 	}

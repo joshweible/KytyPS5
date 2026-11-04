@@ -299,7 +299,6 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  uint32_t push_data_cursor) {
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
 	                                                specialization)) {
-		EXIT_IF(!t_speculative_lookup);
 		t_speculative_failed = true;
 		return nullptr;
 	}
@@ -378,6 +377,7 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               uint32_t& push_data_cursor) {
+	t_speculative_failed = false;
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
@@ -428,7 +428,13 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			module = cached.FindModule<false>(runtime, push_data_cursor);
 		}
 		if (module != nullptr) return bind(*module);
-		if (t_speculative_failed) return nullptr;
+		if (t_speculative_failed) {
+			// A compute dispatch is skipped rather than ending the session; a draw has no such path.
+			if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				EXIT_IF(!t_speculative_lookup);
+			}
+			return nullptr;
+		}
 	}
 
 	options.shader_hash     = params.hash;
@@ -473,7 +479,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		auto& program = entry->second;
 		if (!ShaderRecompiler::IR::MaterializeResources(
 		        program.resource_plan, runtime, program.resources, program.specialization)) {
-			EXIT_IF(!t_speculative_lookup);
+			if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				EXIT_IF(!t_speculative_lookup);
+			}
 			m_program_cache.erase(entry);
 			return nullptr;
 		}
@@ -1094,45 +1102,51 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	return pipeline;
 }
 
-PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info) {
+PipelineCache::Pipeline* PipelineCache::GetComputePipeline(
+    const ShaderComputeInputInfo& input_info) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	const auto& module = *input_info.stage.module;
 
-	if (const auto build = m_compute_builds.find(module.id); build != m_compute_builds.end()) {
-		const auto result = build->second;
-		// Compile here if no worker started it; otherwise wait, ahead of the queued others.
-		if (!m_compute_queue->RunHere(module.id)) {
-			m_compute_queue->Promote(module.id);
-			result.wait();
+	auto build = m_compute_builds.find(module.id);
+	if (build == m_compute_builds.end()) {
+		if (const auto ready = m_compute_pipelines.find(module.id);
+		    ready != m_compute_pipelines.end()) {
+			return &ready->second;
 		}
-		m_compute_builds.erase(build);
-		auto& pipeline = m_compute_pipelines[module.id];
-		EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
-		CheckpointDriverCache();
-		return pipeline;
+		if (graphics_debug_dump_enabled()) {
+			ShaderDbgDumpInputInfo(input_info);
+		}
+		StartComputeBuild(module);
+		build = m_compute_builds.find(module.id);
+		EXIT_NOT_IMPLEMENTED(build == m_compute_builds.end());
 	}
 
-	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
-	auto& pipeline        = iter->second;
-	if (!inserted) {
-		return pipeline;
+	// A compile can take minutes, so a dispatch waits a bounded time, once per pipeline. After that
+	// it is skipped until the pipeline is ready: the game keeps running with an effect missing
+	// instead of freezing, and the other new pipelines keep compiling on the workers.
+	static const auto budget = [] {
+		const char* text = std::getenv("KYTY_PIPELINE_WAIT_MS");
+		return std::chrono::milliseconds(text != nullptr ? std::atoi(text) : 1000);
+	}();
+	const bool already_waited = m_compute_skipped.contains(module.id);
+	if (build->second.wait_for(already_waited ? std::chrono::milliseconds(0) : budget) !=
+	    std::future_status::ready) {
+		if (!already_waited) {
+			m_compute_skipped.insert(module.id);
+			m_compute_queue->Promote(module.id);
+			std::printf("pipeline-skip: compute hash=%016llx still compiling\n",
+			            static_cast<unsigned long long>(module.info.shader_hash));
+			std::fflush(stdout);
+		}
+		return nullptr;
 	}
-
-	if (graphics_debug_dump_enabled()) {
-		ShaderDbgDumpInputInfo(input_info);
-	}
-
-	{
-		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
-		                                         Common::DebugCounters::Counter::PipelineCreateNs,
-		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache);
-	}
-	m_compute_pipelines_created++;
+	m_compute_builds.erase(build);
+	m_compute_skipped.erase(module.id);
+	auto& pipeline = m_compute_pipelines[module.id];
+	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 	CheckpointDriverCache();
-
-	return pipeline;
+	return &pipeline;
 }
 
 void PipelineCache::StartComputeBuild(const ShaderModule& module) {

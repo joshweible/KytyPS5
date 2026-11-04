@@ -29,6 +29,7 @@
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -599,8 +600,18 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		desc.info.UpdateSize();
 	}
 	const auto alignment = desc.info.DataAlignment();
-	EXIT_NOT_IMPLEMENTED(desc.info.data.size == 0 || alignment == 0 ||
-	                     (address & (static_cast<uint64_t>(alignment) - 1u)) != 0);
+	if (desc.info.data.size == 0 || alignment == 0 ||
+	    (address & (static_cast<uint64_t>(alignment) - 1u)) != 0) {
+		// Descriptor tables also hold other data, which a shader never samples; it stays empty.
+		static std::atomic<uint32_t> reported {0};
+		if (reported.fetch_add(1u) < 8u) {
+			std::printf("descriptor is no usable image: address=0x%016llx size=%llu alignment=%u\n",
+			            static_cast<unsigned long long>(address),
+			            static_cast<unsigned long long>(desc.info.data.size),
+			            static_cast<uint32_t>(alignment));
+		}
+		return {.layout = vk::ImageLayout::eGeneral};
+	}
 	// Image heaps keep the descriptors of unmapped textures, which PS5 never samples.
 	if (resource.heap && !m_context.IsMapped(address, desc.info.data.size)) {
 		return {.layout = vk::ImageLayout::eGeneral};

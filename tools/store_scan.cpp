@@ -101,6 +101,15 @@ int main(int argc, char** argv) {
 		const size_t meta      = spirv >= p + 4 ? spirv - 4 - p : 0;
 		const auto   meta_hash = XXH3_64bits(raw.data() + p, meta);
 		const auto   spv_hash  = XXH3_64bits(raw.data() + spirv, raw.size() - spirv);
+		if (argc > 4 && spirv != 0 && stage == 3u) {
+			char name[512];
+			std::snprintf(name, sizeof(name), "%s/%016llx_%zu.spv", argv[4],
+			              static_cast<unsigned long long>(hash), raw.size() - spirv);
+			if (FILE* dump = std::fopen(name, "wb")) {
+				std::fwrite(raw.data() + spirv, 1, raw.size() - spirv, dump);
+				std::fclose(dump);
+			}
+		}
 		std::fprintf(out, "%llu,%016llx,%u,%u,%016llx,%u,%016llx,%zu,%016llx,%zu,%016llx,",
 		             static_cast<unsigned long long>(stage), static_cast<unsigned long long>(hash),
 		             user_data, static_len, static_cast<unsigned long long>(static_hash),

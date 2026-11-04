@@ -39,6 +39,8 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+void NoteDispatch(uint64_t hash, uint32_t x, uint32_t y, uint32_t z, uint64_t tick);
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -339,7 +341,12 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	buffer.EndRendering();
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	auto* const compute_pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	if (compute_pipeline == nullptr) {
+		ResetBindings();
+		return;
+	}
+	auto& pipeline = *compute_pipeline;
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
@@ -448,6 +455,8 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			}
 		}
 	} else {
+		NoteDispatch(input_info.stage.module->info.shader_hash, thread_group_x, thread_group_y,
+		             thread_group_z, m_context.GetCommandScheduler().CurrentTick());
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
@@ -479,7 +488,12 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	m_context.GetImageHeap().BeginDraw();
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
 	buffer.EndRendering();
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	auto* const compute_pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	if (compute_pipeline == nullptr) {
+		ResetBindings();
+		return;
+	}
+	auto& pipeline = *compute_pipeline;
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
@@ -513,6 +527,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	NoteDispatch(input_info.stage.module->info.shader_hash, 0u, 0u, 0u, m_context.GetCommandScheduler().CurrentTick());
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);

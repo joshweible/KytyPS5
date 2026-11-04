@@ -28,6 +28,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -211,7 +212,8 @@ public:
 	                                      ShaderComputeInputInfo&      input_info);
 
 	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
-	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
+	// Null while the pipeline is still compiling: the dispatch is skipped, not waited for.
+	Pipeline* GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:
 	friend struct PipelineCacheTestAccess;
@@ -267,6 +269,7 @@ private:
 	// the build finishes, so a dispatch waits for it here first.
 	std::unordered_map<uint64_t, std::shared_future<vk::Pipeline>>             m_compute_builds;
 	std::unique_ptr<ComputePipelineQueue>                                      m_compute_queue;
+	std::unordered_set<uint64_t>                                               m_compute_skipped;
 	uint64_t                                                                   m_compute_pipelines_created = 0;
 	void StartComputeBuild(const ShaderModule& module);
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;

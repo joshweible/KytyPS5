@@ -133,7 +133,9 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r, bool intege
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;
-	sampler_info.unnormalizedCoordinates = (r.ForceUnormCoords() ? VK_TRUE : VK_FALSE);
+	static const bool no_unnormalized = std::getenv("KYTY_NO_UNORM_SAMPLER") != nullptr;
+	sampler_info.unnormalizedCoordinates =
+	    (r.ForceUnormCoords() && !no_unnormalized ? VK_TRUE : VK_FALSE);
 
 	if (r.ForceUnormCoords()) {
 		sampler_info.addressModeU     = vk::SamplerAddressMode::eClampToEdge;
