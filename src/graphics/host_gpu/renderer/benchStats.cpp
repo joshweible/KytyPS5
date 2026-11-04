@@ -52,6 +52,14 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
+// By packet length: under 10, 30, 100, 300 and 1000 us, 3 ms, more.
+constexpr int PacketBuckets = 7;
+struct PacketBucket {
+	std::atomic<uint64_t> count {0}, ns {0};
+};
+PacketBucket g_packet_buckets[PacketBuckets];
+std::atomic<uint64_t> g_opcode_ns[256];
+std::atomic<uint64_t> g_opcode_count[256];
 std::atomic<uint64_t> g_image_known {0};
 std::atomic<uint64_t> g_image_searched {0};
 std::atomic<uint64_t> g_dispatch_runs {0};
@@ -102,6 +110,21 @@ void ReportReads(double frames) {
 	            per(g_write_kinds[WriteCopy].exchange(0)), per(g_write_kinds[WriteImage].exchange(0)));
 	std::printf("image-lookup: known=%.0f searched=%.0f /frame\n", per(g_image_known.exchange(0)),
 	            per(g_image_searched.exchange(0)));
+	const char* const bucket_names[PacketBuckets] = {"<10us", "<30us", "<100us", "<300us", "<1ms", "<3ms", ">3ms"};
+	for (int i = 0; i < PacketBuckets; i++) {
+		std::printf("packet-time: %-7s %.0f/frame %.1f ms/frame\n", bucket_names[i],
+		            per(g_packet_buckets[i].count.exchange(0)),
+		            static_cast<double>(g_packet_buckets[i].ns.exchange(0)) * 1e-6 / frames);
+	}
+	for (int i = 0; i < 256; i++) {
+		const auto ns = g_opcode_ns[i].exchange(0);
+		const auto count = g_opcode_count[i].exchange(0);
+		if (static_cast<double>(ns) * 1e-6 / frames >= 0.5) {
+			std::printf("packet-op: 0x%02x %.0f/frame %.1f ms/frame %.1f us/op\n", i, per(count),
+			            static_cast<double>(ns) * 1e-6 / frames,
+			            static_cast<double>(ns) * 1e-3 / static_cast<double>(count));
+		}
+	}
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
 	std::printf("dispatch-why: seen-raw-write=%.0f raw-write=%.0f raw-read=%.0f seen-raw-read=%.0f heap=%.0f full=%.0f overlap=%.0f /frame\n",
 	            per(g_dispatch_why[0].exchange(0)), per(g_dispatch_why[1].exchange(0)), per(g_dispatch_why[2].exchange(0)),
@@ -292,6 +315,32 @@ void NoteDispatchOverlap() {
 
 void NoteImageLookup(bool known) {
 	(known ? g_image_known : g_image_searched).fetch_add(1u, std::memory_order_relaxed);
+}
+
+thread_local uint64_t t_packet_shader = 0;
+thread_local uint64_t t_packet_wait   = 0;
+
+void NoteShader(uint64_t hash) {
+	t_packet_shader = hash;
+}
+
+void AddSchedulerWait(uint64_t ns) {
+	t_packet_wait += ns;
+}
+
+void NotePacket(uint32_t opcode, uint64_t ns) {
+	if (ns >= 1000000u && Enabled()) {
+		std::printf("slow-packet: op=0x%02x %.2f ms wait=%.2f shader=%016llx\n", opcode,
+		            static_cast<double>(ns) * 1e-6, static_cast<double>(t_packet_wait) * 1e-6,
+		            static_cast<unsigned long long>(t_packet_shader));
+	}
+	t_packet_wait = 0;
+	const int bucket = ns < 10000u ? 0 : ns < 30000u ? 1 : ns < 100000u ? 2 : ns < 300000u ? 3
+	                 : ns < 1000000u ? 4 : ns < 3000000u ? 5 : 6;
+	g_packet_buckets[bucket].count.fetch_add(1u, std::memory_order_relaxed);
+	g_packet_buckets[bucket].ns.fetch_add(ns, std::memory_order_relaxed);
+	g_opcode_ns[opcode & 255u].fetch_add(ns, std::memory_order_relaxed);
+	g_opcode_count[opcode & 255u].fetch_add(1u, std::memory_order_relaxed);
 }
 
 void NoteCleanRead() {

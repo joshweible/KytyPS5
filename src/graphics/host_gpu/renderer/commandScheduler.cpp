@@ -163,6 +163,15 @@ void CommandScheduler::Finish() {
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
+	struct Timed {
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		~Timed() {
+			BenchStats::AddSchedulerWait(static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(
+			        std::chrono::steady_clock::now() - start)
+			        .count()));
+		}
+	} timed;
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();

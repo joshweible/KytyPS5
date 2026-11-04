@@ -1226,6 +1226,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
+	BenchStats::NoteShader(state.ps_active ? state.ps_input_info.stage.module->info.shader_hash
+	                                       : state.vertex_info[0].stage.module->info.shader_hash);
 	m_context.GetCommandScheduler().ProfileMark(
 	    CommandScheduler::ProfileKind::Draw,
 	    state.ps_active ? state.ps_input_info.stage.module->info.shader_hash

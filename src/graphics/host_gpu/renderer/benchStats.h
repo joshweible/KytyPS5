@@ -26,6 +26,9 @@ void NoteDispatchBarrier(bool conflict); // Run started, or a conflict inside on
 void NoteDispatchOverlap();
 void NoteDispatchWhy(uint32_t why, uint64_t hash);
 void NoteImageLookup(bool known);
+void NotePacket(uint32_t opcode, uint64_t ns);
+void NoteShader(uint64_t hash); // The operation the current packet recorded.
+void AddSchedulerWait(uint64_t ns);
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

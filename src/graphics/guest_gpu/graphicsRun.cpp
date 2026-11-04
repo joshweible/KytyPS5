@@ -627,15 +627,16 @@ void CommandProcessor::RunDispatchLookahead(const Pm4Execution& execution) {
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
 	auto       packet_kind = BenchStats::GpuOther;
+	uint32_t   packet_opcode = 0;
 	auto       packet_from = std::chrono::steady_clock::now();
 	while (!execution.m_buffer_stack.empty()) {
 		m_renderer.GetBufferCache().EndPacket();
 		{
 			const auto now = std::chrono::steady_clock::now();
-			BenchStats::AddGpuThreadTime(
-			    packet_kind, static_cast<uint64_t>(
-			                     std::chrono::duration_cast<std::chrono::nanoseconds>(now - packet_from)
-			                         .count()));
+			const auto packet_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(now - packet_from).count());
+			BenchStats::AddGpuThreadTime(packet_kind, packet_ns);
+			BenchStats::NotePacket(packet_opcode, packet_ns);
 			packet_from = now;
 		}
 		if (g_gpu_state != nullptr) {
@@ -652,6 +653,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        remaining_dw  = total_dw - cursor.offset_dw;
 		const auto        packet_header = packet[0];
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
+		packet_opcode = opcode;
 		packet_kind = opcode == Pm4::IT_DISPATCH_DIRECT || opcode == Pm4::IT_DISPATCH_INDIRECT
 		                  ? BenchStats::GpuDispatch
 		              : opcode == Pm4::IT_DRAW_INDEX_2 || opcode == Pm4::IT_DRAW_INDEX_AUTO ||

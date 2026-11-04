@@ -49,6 +49,7 @@ void NoteDispatch(uint64_t hash, uint32_t x, uint32_t y, uint32_t z, uint64_t ti
 // reported. Tells one runaway dispatch from a batch that only adds up past the GPU watchdog.
 static void TimeDispatch(CommandScheduler& scheduler, uint64_t hash, uint32_t x, uint32_t y,
                          uint32_t z, uint32_t wave) {
+	BenchStats::NoteShader(hash);
 	scheduler.ProfileMark(CommandScheduler::ProfileKind::Dispatch, hash, x * y, z, wave);
 	static const bool enabled = std::getenv("KYTY_TIME_DISPATCHES") != nullptr;
 	if (!enabled) return;
