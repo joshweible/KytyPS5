@@ -52,7 +52,8 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
-std::atomic<uint64_t> g_stage_ns[RecordStages];
+std::atomic<uint64_t> g_stage_ns[RecordStages * 2];
+thread_local uint32_t t_stage_bank = 0;
 thread_local std::chrono::steady_clock::time_point t_stage_from;
 std::atomic<uint64_t> g_late_words {0};
 // By packet length: under 10, 30, 100, 300 and 1000 us, 3 ms, more.
@@ -133,8 +134,9 @@ void ReportReads(double frames) {
 	    "draw-buffers", "draw-pipeline", "draw-acquire", "draw-commit", "draw-record",
 	    "cs-programs", "cs-bindings", "cs-bda", "cs-images", "cs-buffers", "cs-commit", "cs-record"};
 	for (uint32_t i = 1; i < RecordStages; i++) {
-		std::printf("record-stage: %-14s %.2f ms/frame\n", stage_names[i],
-		            static_cast<double>(g_stage_ns[i].exchange(0)) * 1e-6 / frames);
+		std::printf("record-stage: %-14s %.2f indirect %.2f ms/frame\n", stage_names[i],
+		            static_cast<double>(g_stage_ns[i].exchange(0)) * 1e-6 / frames,
+		            static_cast<double>(g_stage_ns[i + RecordStages].exchange(0)) * 1e-6 / frames);
 	}
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
 	std::printf("late-words: %.1f /frame\n", per(g_late_words.exchange(0)));
@@ -359,10 +361,14 @@ void NoteLateWords(uint32_t count) {
 	g_late_words.fetch_add(count, std::memory_order_relaxed);
 }
 
+void SetStageBank(uint32_t bank) {
+	t_stage_bank = bank;
+}
+
 void MarkStage(RecordStage stage) {
 	const auto now = std::chrono::steady_clock::now();
 	if (stage != StageNone) {
-		g_stage_ns[stage].fetch_add(
+		g_stage_ns[stage + t_stage_bank * RecordStages].fetch_add(
 		    static_cast<uint64_t>(
 		        std::chrono::duration_cast<std::chrono::nanoseconds>(now - t_stage_from).count()),
 		    std::memory_order_relaxed);

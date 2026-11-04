@@ -53,6 +53,7 @@ enum RecordStage : uint32_t {
 	RecordStages
 };
 void MarkStage(RecordStage stage);
+void SetStageBank(uint32_t bank);
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

@@ -1236,6 +1236,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	BenchStats::MarkStage(BenchStats::DrawRecord);
+	BenchStats::SetStageBank(0);
 	BenchStats::NoteShader(state.ps_active ? state.ps_input_info.stage.module->info.shader_hash
 	                                       : state.vertex_info[0].stage.module->info.shader_hash);
 	m_context.GetCommandScheduler().ProfileMark(
@@ -1289,6 +1290,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 	BenchStats::MarkStage(BenchStats::StageNone);
+	BenchStats::SetStageBank(args.indirect.address != 0 ? 1u : 0u);
 
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
