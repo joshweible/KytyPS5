@@ -45,6 +45,8 @@ struct ReadRow {
 	std::atomic<uint64_t> pc {0}; // Last faulting instruction.
 };
 ReadRow g_reads[FaultRows];
+std::atomic<uint64_t> g_writer_finished {0};
+std::atomic<uint64_t> g_writer_pending {0};
 thread_local uint64_t t_fault_pc = 0;
 
 void ReportReads(double frames) {
@@ -80,6 +82,8 @@ void ReportReads(double frames) {
 	            "%.2f MiB/frame\n",
 	            per(total.count), per(total.empty), ms(total.queue), ms(total.wait),
 	            ms(total.copy), per(total.bytes) / (1024.0 * 1024.0));
+	std::printf("read-writer: finished=%.1f pending=%.1f /frame\n",
+	            per(g_writer_finished.exchange(0)), per(g_writer_pending.exchange(0)));
 	std::printf("bench-anchor: 0x%llx\n", reinterpret_cast<unsigned long long>(&ReportReads));
 	const char* const names[4] = {"read-game", "read-gpu", "write-game", "write-gpu"};
 	for (size_t i = 0; i < std::min<size_t>(rows.size(), 14u); i++) {
@@ -183,6 +187,10 @@ bool Enabled() {
 		return true;
 	}();
 	return enabled;
+}
+
+void NoteWriter(bool finished) {
+	(finished ? g_writer_finished : g_writer_pending).fetch_add(1u, std::memory_order_relaxed);
 }
 
 void SetFaultPc(uint64_t pc) {
