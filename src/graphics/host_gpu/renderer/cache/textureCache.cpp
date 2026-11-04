@@ -1390,6 +1390,13 @@ void TextureCache::UpdateImage(ImageId id) {
 	RefreshImage(id);
 }
 
+void TextureCache::RevisitImage(ImageId id) {
+	std::scoped_lock lock {m_lock};
+	auto&            image = m_slot_images[id];
+	image.tick_accessed_last = m_scheduler.CurrentTick();
+	TouchImage(image);
+}
+
 ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool ensure_valid) {
 	std::scoped_lock lock {m_lock};
 	ImageIds         matches;

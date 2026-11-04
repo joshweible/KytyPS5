@@ -52,6 +52,9 @@ public:
 	KYTY_CLASS_NO_COPY(TextureCache);
 
 	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false);
+	// A lookup result holds until this changes.
+	[[nodiscard]] uint64_t      ImageGeneration() const noexcept { return m_image_generation; }
+	void                        RevisitImage(ImageId id);
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);

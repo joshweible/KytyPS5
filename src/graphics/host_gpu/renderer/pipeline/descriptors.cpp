@@ -506,6 +506,47 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		return {.layout = vk::ImageLayout::eGeneral};
 	}
 
+	// The same descriptor and use resolve to the same binding until an image comes or goes. Color
+	// metadata is not reused: each lookup applies the clears written since the last one.
+	struct BindingKey {
+		std::array<uint32_t, 8> fields;
+		std::array<uint32_t, 9> use;
+		bool operator==(const BindingKey&) const = default;
+	};
+	struct KnownBinding {
+		BindingKey     key;
+		TextureBinding binding;
+		ImageId        found;
+		uint64_t       generation = 0;
+	};
+	static std::unordered_map<uint64_t, KnownBinding> known_bindings;
+	BindingKey binding_key {};
+	std::copy_n(descriptor.fields, 8, binding_key.fields.begin());
+	binding_key.use = {static_cast<uint32_t>(resource.resource_class),
+	                   static_cast<uint32_t>(resource.numeric_class),
+	                   static_cast<uint32_t>(resource.dimension),
+	                   static_cast<uint32_t>(resource.mip_mode),
+	                   resource.mip_count,
+	                   static_cast<uint32_t>(resource.conversion_format),
+	                   resource.shader_swizzle,
+	                   static_cast<uint32_t>(resource.srgb_decode),
+	                   (resource.read ? 1u : 0u) | (resource.written ? 2u : 0u) |
+	                       (resource.atomic ? 4u : 0u) | (resource.atomic64 ? 8u : 0u) |
+	                       (resource.unfiltered_access_only ? 16u : 0u) |
+	                       (resource.depth_compare ? 32u : 0u) | (resource.skip_degamma ? 64u : 0u) |
+	                       (resource.cube ? 128u : 0u) | (resource.r128 ? 256u : 0u) |
+	                       (resource.heap ? 512u : 0u)};
+	const auto binding_hash = XXH3_64bits(&binding_key, sizeof(binding_key));
+	if (const auto known = known_bindings.find(binding_hash);
+	    known != known_bindings.end() && known->second.key == binding_key &&
+	    known->second.generation == texture_cache.ImageGeneration()) {
+		const auto& bound = texture_cache.GetImage(known->second.binding.image_id);
+		if (bound.registered && !bound.depth_id && !bound.binding.needs_rebind) {
+			texture_cache.RevisitImage(known->second.found);
+			return known->second.binding;
+		}
+	}
+
 	const auto address         = descriptor.Base40();
 	const auto width           = static_cast<uint32_t>(descriptor.Width5()) + 1u;
 	const auto height          = static_cast<uint32_t>(descriptor.Height5()) + 1u;
@@ -671,6 +712,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		// Another extent at the address holds it; the heap retries once an image is created.
 		return {.desc = std::move(desc), .layout = vk::ImageLayout::eGeneral};
 	}
+	const auto generation          = texture_cache.ImageGeneration();
+	const auto found               = id;
 	auto*      image               = &texture_cache.GetImage(id);
 	const bool stencil_association = static_cast<bool>(image->depth_id);
 	if (stencil_association) {
@@ -691,7 +734,12 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		(void)SelectSampledColorView(image->info.pixel_format, desc.view_info.format,
 		                             descriptor.DstSelXYZW());
 	}
-	return {id, nullptr, std::move(desc)};
+	TextureBinding result {id, nullptr, std::move(desc)};
+	if (result.desc.info.metadata.kind == ImageMetadataKind::None) {
+		if (known_bindings.size() >= 131072u) known_bindings.clear();
+		known_bindings[binding_hash] = {binding_key, result, found, generation};
+	}
+	return result;
 }
 
 static vk::Sampler NativeSampler(RenderContext&                       context,
