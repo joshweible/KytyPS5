@@ -9,8 +9,8 @@ frame on its own. Each item is measured when it lands.
 
 | Budget | Start | Now | Target |
 |---|---|---|---|
-| Frame | 122 ms | 80 ms | 33 ms |
-| GPU work | 55 ms | 47 ms | 28 ms |
+| Frame | 122 ms | 79 ms | 33 ms |
+| GPU work | 55 ms | 46 ms | 28 ms |
 | GPU thread recording | 75 ms | 68 ms | 28 ms |
 | GPU thread blocked on the GPU | 33 ms | 9 ms | under 5 ms |
 
@@ -24,6 +24,30 @@ frame on its own. Each item is measured when it lands.
 - Compiler work is measured and worth about 5%: ThinLTO with Zen 4 tuning gives 10.88 fps against
   10.48, and PGO 11.0. AVX-512 is worse, because 512-bit streaming loads from VRAM are very slow on
   Zen 4. ThinLTO and PGO together fail to link. None of this is in the default build yet.
+
+## Measured and ruled out
+
+The GPU thread limits the frame, so GPU savings do not raise the frame rate until recording drops
+below GPU time. Results at the campfire, with run-to-run noise of about 0.3 fps:
+
+- Barriers cost about 1.3 ms of direct GPU time. Following the game's own sync packets cut conflict
+  barriers from 1,110 to 180 a frame and made GPU time worse.
+- Clocks are at full speed in P0, at 2850 MHz, with PCIe 4.0 x16.
+- Robust image access makes no difference, and relaxing float contraction gains 3% at most.
+- None of the 40 heaviest shaders use the dispatcher fallback.
+- Exec selects are spread over many masks, so removing the root mask would save under 10%.
+- Writing uploads straight into mapped VRAM loses the device: the CPU gets ahead of queued GPU work.
+- Removing the upload barrier changes nothing.
+- A thread per guest ring saves 15 ms at most: ring 0 holds 64 ms of recording.
+- COND_EXEC's 6 ms is a real cross-ring sync, guarding waits for async compute.
+
+## Tools
+
+- `tools/yotei_bench.ps1`: frame rate, stage, packet and event counters.
+- `KYTY_GPU_PROFILE`: GPU time by shader, barrier and other work.
+- `KYTY_FUNCTION_PROFILE` builds with `tools/function_report.py`: exact time per function on the GPU
+  thread. The hooks add about 18 ms, mostly to functions called thousands of times a frame, so
+  rank those by call count before believing them.
 
 ## Order of work
 
