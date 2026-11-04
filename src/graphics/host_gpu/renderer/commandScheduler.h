@@ -25,7 +25,18 @@ public:
 	void           EndRendering() { m_command.EndRendering(); }
 	// KYTY_GPU_PROFILE=<start seconds>: charges the GPU time since the last mark to this operation,
 	// then prints a report once the capture is full. Does nothing otherwise.
-	enum class ProfileKind : uint8_t { Start, Draw, Dispatch };
+	// Other: everything since the last mark that was not an operation or barrier. A mark just before
+	// an operation or barrier keeps that time from being charged to it.
+	enum class ProfileKind : uint8_t { Start, Draw, Dispatch, Other, Barrier };
+	enum ProfileBarrier : uint64_t {
+		BarrierImageRepeatWrite,
+		BarrierImageSameLayout,
+		BarrierImageLayoutChange,
+		BarrierDispatchConflict,
+		BarrierDispatchFinish,
+		BarrierRunStart,
+		ProfileBarriers
+	};
 	void ProfileMark(ProfileKind kind, uint64_t hash, uint32_t a, uint32_t b, uint32_t wave);
 	void           Flush();
 	void           Flush(SubmitInfo& submit);

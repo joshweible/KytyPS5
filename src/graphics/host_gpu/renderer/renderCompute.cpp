@@ -343,7 +343,11 @@ void RenderExecutor::OrderDispatch(CommandBuffer& buffer, const ShaderComputeInp
 		BenchStats::NoteDispatchBarrier(false);
 		// What came before may still touch anything this dispatch writes.
 		(void)buffer.Handle();
+		auto& scheduler = m_context.GetCommandScheduler();
+		scheduler.ProfileMark(CommandScheduler::ProfileKind::Other, 0, 0, 0, 0);
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		scheduler.ProfileMark(CommandScheduler::ProfileKind::Barrier, CommandScheduler::BarrierRunStart,
+		                      0, 0, 0);
 		buffer.StartDispatchRun();
 		seen = {};
 	} else if (conflict) {
@@ -360,7 +364,11 @@ void RenderExecutor::OrderDispatch(CommandBuffer& buffer, const ShaderComputeInp
 			         seen.images.size() + now.images.size() > MaxTracked) why = 5;
 			BenchStats::NoteDispatchWhy(why, top);
 		}
+		auto& scheduler = m_context.GetCommandScheduler();
+		scheduler.ProfileMark(CommandScheduler::ProfileKind::Other, 0, 0, 0, 0);
 		ComputeToComputeBarrier(vk_buffer);
+		scheduler.ProfileMark(CommandScheduler::ProfileKind::Barrier,
+		                      CommandScheduler::BarrierDispatchConflict, 0, 0, 0);
 		seen = {};
 	} else {
 		BenchStats::NoteDispatchOverlap();
@@ -592,6 +600,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			std::printf("\n");
 			std::fflush(stdout);
 		}
+		m_context.GetCommandScheduler().ProfileMark(CommandScheduler::ProfileKind::Other, 0, 0, 0, 0);
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);

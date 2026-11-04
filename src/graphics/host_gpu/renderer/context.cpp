@@ -35,7 +35,11 @@ void CommandBuffer::Begin() {
 
 void CommandBuffer::FinishDispatches() const noexcept {
 	m_dispatch_barrier_due = false;
+	auto& scheduler        = m_context.GetCommandScheduler();
+	scheduler.ProfileMark(CommandScheduler::ProfileKind::Other, 0, 0, 0, 0);
 	ShaderAccessBarrier(m_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	scheduler.ProfileMark(CommandScheduler::ProfileKind::Barrier,
+	                      CommandScheduler::BarrierDispatchFinish, 0, 0, 0);
 }
 
 void CommandBuffer::End() const {

@@ -247,7 +247,17 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	vk::DependencyInfo dependency {};
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
+	constexpr auto writes = vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite |
+	                        vk::AccessFlagBits2::eMemoryWrite;
+	const auto& first = barriers.front();
+	const auto  label =
+	    first.oldLayout != first.newLayout ? CommandScheduler::BarrierImageLayoutChange
+	    : static_cast<bool>(first.srcAccessMask & writes) && static_cast<bool>(first.dstAccessMask & writes)
+	        ? CommandScheduler::BarrierImageRepeatWrite
+	        : CommandScheduler::BarrierImageSameLayout;
+	m_scheduler.ProfileMark(CommandScheduler::ProfileKind::Other, 0, 0, 0, 0);
 	command_buffer.pipelineBarrier2(dependency);
+	m_scheduler.ProfileMark(CommandScheduler::ProfileKind::Barrier, label, 0, 0, 0);
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,

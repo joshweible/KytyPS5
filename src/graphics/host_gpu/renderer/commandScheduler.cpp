@@ -368,12 +368,31 @@ void CommandScheduler::ReportProfile() {
 		bool     draw = false;
 	};
 	std::map<uint64_t, Row> rows;
-	double   draw_ms = 0.0, dispatch_ms = 0.0;
+	double   draw_ms = 0.0, dispatch_ms = 0.0, other_ms = 0.0;
 	uint64_t draws = 0, dispatches = 0;
+	double   barrier_ms[ProfileBarriers] {};
+	uint64_t barrier_count[ProfileBarriers] {};
+	double   size_ms[6] {};
+	uint64_t size_count[6] {};
 	for (size_t i = 1; i < stamps.size(); i++) {
 		const auto& record = m_profile[i];
 		if (record.kind == ProfileKind::Start) continue;
 		const double ms = static_cast<double>(stamps[i] - stamps[i - 1]) * period;
+		if (record.kind == ProfileKind::Other) {
+			other_ms += ms;
+			continue;
+		}
+		if (record.kind == ProfileKind::Barrier) {
+			barrier_ms[record.hash] += ms;
+			barrier_count[record.hash]++;
+			continue;
+		}
+		if (record.kind == ProfileKind::Dispatch) {
+			const double us = ms * 1000.0;
+			const int bucket = us < 5.0 ? 0 : us < 20.0 ? 1 : us < 100.0 ? 2 : us < 500.0 ? 3 : us < 2000.0 ? 4 : 5;
+			size_ms[bucket] += ms;
+			size_count[bucket]++;
+		}
 		auto&        row = rows[record.hash];
 		row.ms += ms;
 		row.count++;
@@ -393,6 +412,19 @@ void CommandScheduler::ReportProfile() {
 	const double frames = static_cast<double>(draws + dispatches) / 3950.0;
 	std::printf("gpu-prof: frames=%.1f draws %.1f ms/frame, dispatches %.1f ms/frame\n",
 	            frames, draw_ms / frames, dispatch_ms / frames);
+	std::printf("gpu-prof: other %.1f ms/frame\n", other_ms / frames);
+	const char* const barrier_names[ProfileBarriers] = {
+	    "image-repeat-write", "image-same-layout", "image-layout-change",
+	    "dispatch-conflict",  "dispatch-finish",   "run-start"};
+	for (int i = 0; i < ProfileBarriers; i++) {
+		std::printf("gpu-prof: barrier %-20s %.2f ms/frame %.0f/frame\n", barrier_names[i],
+		            barrier_ms[i] / frames, static_cast<double>(barrier_count[i]) / frames);
+	}
+	const char* const size_names[6] = {"<5us", "<20us", "<100us", "<500us", "<2ms", ">2ms"};
+	for (int i = 0; i < 6; i++) {
+		std::printf("gpu-prof: dispatch %-7s %.2f ms/frame %.0f/frame\n", size_names[i],
+		            size_ms[i] / frames, static_cast<double>(size_count[i]) / frames);
+	}
 	std::vector<std::pair<double, uint64_t>> order;
 	for (const auto& [hash, row]: rows) order.emplace_back(row.ms, hash);
 	std::sort(order.rbegin(), order.rend());
