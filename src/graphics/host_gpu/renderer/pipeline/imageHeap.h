@@ -119,6 +119,7 @@ private:
 	void     Unreference(Element& element);
 	Image*   ImageOf(const Element& element) const;
 	uint32_t Allocate();
+	void     LogPressure() const;
 	void     Retire(View& view);
 	void     Resize(Memory& memory, uint64_t size);
 	void     WriteDescriptors();

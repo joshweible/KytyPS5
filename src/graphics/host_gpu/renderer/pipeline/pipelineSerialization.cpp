@@ -44,6 +44,11 @@ struct Frame {
 // Changes with every build, so records never meet code that encodes them differently. Zero when
 // the executable cannot be found.
 uint64_t BuildStamp() {
+	// KYTY_SHADER_STORE_KEY=<number> keeps the store across rebuilds during development; change it
+	// whenever the recompiler or the record format changes, or stale shaders are reused.
+	if (const char* key = std::getenv("KYTY_SHADER_STORE_KEY"); key != nullptr && *key != '\0') {
+		return std::strtoull(key, nullptr, 10);
+	}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	std::array<wchar_t, 32768> name {};
 	GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
@@ -166,6 +171,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		records = records.subspan(header.size());
 		while (LoadRecord(records)) {
 		}
+		if (std::getenv("KYTY_SPEC_DUMP") != nullptr) std::exit(0);
 	}
 	// A damaged record ends the store; the records before it stay.
 	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
@@ -200,6 +206,34 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
 	                                                          start)
 	        .count()));
+}
+
+// KYTY_SPEC_DUMP=<file>: writes each stored module's resource specialization while loading, then
+// the process exits after the load. Measures how far modules depend on runtime descriptors.
+static void DumpSpecialization(const auto& key, const ShaderModule& module) {
+	static FILE* file = [] {
+		const char* path = std::getenv("KYTY_SPEC_DUMP");
+		return path != nullptr ? std::fopen(path, "wb") : nullptr;
+	}();
+	if (file == nullptr) return;
+	const auto  hash = static_cast<unsigned long long>(key.hash);
+	const auto& spec = module.specialization;
+	std::fprintf(file, "M,%d,%016llx,%016llx,%zu,%zu,%zu\n", static_cast<int>(key.stage), hash,
+	             static_cast<unsigned long long>(module.id), spec.buffers.size(),
+	             spec.images.size(), spec.samplers.size());
+	for (const auto& b: spec.buffers) {
+		std::fprintf(file, "B,%016llx,%u,%u,%x,%d,%d,%u\n", hash, b.packed_stride,
+		             static_cast<uint32_t>(b.descriptor_format), b.descriptor_swizzle,
+		             b.zero_stride_oob ? 1 : 0, b.scalar_empty ? 1 : 0, b.indirect_root);
+	}
+	for (const auto& i: spec.images) {
+		std::fprintf(file, "I,%016llx,%u,%u,%u,%u,%x,%u,%u,%d,%d,%d,%d\n", hash,
+		             static_cast<uint32_t>(i.numeric_class), static_cast<uint32_t>(i.dimension),
+		             i.mip_count, static_cast<uint32_t>(i.conversion_format), i.shader_swizzle,
+		             static_cast<uint32_t>(i.srgb_decode), i.indirect_root, i.cube ? 1 : 0,
+		             i.skip_degamma ? 1 : 0, i.fmask ? 1 : 0, i.heap ? 1 : 0);
+	}
+	std::fflush(file);
 }
 
 bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
@@ -237,6 +271,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			if (!complete()) {
 				return false;
 			}
+			DumpSpecialization(key, module);
 			const auto [program, inserted] = m_program_cache.try_emplace(std::move(key));
 			if (inserted &&
 			    !ShaderRecompiler::IR::LoadResourcePlan(plan, program->second.resource_plan)) {

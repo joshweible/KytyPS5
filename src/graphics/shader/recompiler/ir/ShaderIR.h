@@ -93,7 +93,8 @@ struct MemoryInfo {
 		                        opcode == ValueOpcode::LoadBufferU32 ||
 		                        opcode == ValueOpcode::LoadBufferU32x2 ||
 		                        opcode == ValueOpcode::LoadBufferU32x3 ||
-		                        opcode == ValueOpcode::LoadBufferU32x4);
+		                        opcode == ValueOpcode::LoadBufferU32x4 ||
+		                        opcode == ValueOpcode::BufferAtomicIAdd32);
 	}
 
 	bool operator==(const MemoryInfo& other) const = default;
@@ -343,7 +344,7 @@ inline constexpr uint32_t ImageBindingCount           = 50u;
 // Resident image heaps share one sampled-image array at binding 0 of this set. A heap slot
 // word is kind << ImageHeapKindShift | element; element 0 is the null descriptor.
 inline constexpr uint32_t ImageHeapSet                = 1u;
-inline constexpr uint32_t ImageHeapCapacity           = 65536u;
+inline constexpr uint32_t ImageHeapCapacity           = 524288u;
 inline constexpr uint32_t ImageHeapKindShift          = 20u;
 
 enum class DescriptorBindingKind : uint32_t {

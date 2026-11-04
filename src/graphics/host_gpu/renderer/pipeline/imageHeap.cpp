@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <cinttypes>
+#include <cstdio>
+#include <vector>
 #include <xxhash.h>
 
 namespace Libs::Graphics {
@@ -378,6 +381,49 @@ Image* ImageHeap::ImageOf(const Element& element) const {
 	return image != nullptr && image->serial == element.serial ? image : nullptr;
 }
 
+// Each doubling past 16K reports who holds the elements and whether they name real images.
+void ImageHeap::LogPressure() const {
+	size_t selected = 0, bound = 0, stale = 0;
+	for (size_t i = 1; i < m_elements.size(); ++i) {
+		const auto& element = m_elements[i];
+		selected += element.refs != 0u ? 1u : 0u;
+		bound += element.binding.image_id ? 1u : 0u;
+		stale += element.stale ? 1u : 0u;
+	}
+	std::printf("image-heap: elements=%zu free=%zu retired=%zu selected=%zu bound=%zu stale=%zu "
+	            "tables=%zu\n",
+	            m_elements.size(), m_free.size(), m_retired.size(), selected, bound, stale,
+	            m_memories.size());
+	std::vector<const View*> views;
+	for (const auto& memory: m_memories) {
+		for (const auto& view: memory->views) views.push_back(view.get());
+	}
+	std::ranges::sort(views, [](const View* a, const View* b) {
+		return a->elements.size() > b->elements.size();
+	});
+	if (views.size() > 5u) views.resize(5u);
+	for (const auto* view: views) {
+		std::printf("image-heap:   table 0x%" PRIx64 " size=%" PRIu64 " step=%" PRIu64
+		            " count=%" PRIu64 " limit=%" PRIu64
+		            " elements=%zu kinds=%zu pending=%zu held=%zu away=%zu\n",
+		            view->memory.base, view->memory.size, view->step, view->count, view->limit,
+		            view->elements.size(), view->kind_keys.size(), view->pending.size(),
+		            view->held.size(), view->away.size());
+	}
+	if (!views.empty()) {
+		int shown = 0;
+		for (const auto& [value, index]: views.front()->elements) {
+			const auto& binding = m_elements[index].binding;
+			std::printf("image-heap:   sample bound=%d %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			            binding.image_id ? 1 : 0, value.dwords[0], value.dwords[1],
+			            value.dwords[2], value.dwords[3], value.dwords[4], value.dwords[5],
+			            value.dwords[6], value.dwords[7]);
+			if (++shown == 6) break;
+		}
+	}
+	std::fflush(stdout);
+}
+
 uint32_t ImageHeap::Allocate() {
 	auto& scheduler = m_context.GetCommandScheduler();
 	while (!m_retired.empty() && scheduler.IsFree(m_retired.front().first)) {
@@ -389,6 +435,7 @@ uint32_t ImageHeap::Allocate() {
 			EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
 		}
 		m_elements.emplace_back();
+		if (m_elements.size() >= 16384u && std::has_single_bit(m_elements.size())) LogPressure();
 		return static_cast<uint32_t>(m_elements.size() - 1u);
 	}
 	const auto index = m_free.back();

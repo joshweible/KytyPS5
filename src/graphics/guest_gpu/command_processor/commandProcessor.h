@@ -117,6 +117,7 @@ public:
 
 private:
 	void ProcessPm4(Pm4Execution& execution);
+	void RunDispatchLookahead(const Pm4Execution& execution);
 	void SuspendPm4();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;
@@ -139,6 +140,7 @@ private:
 	uint64_t m_num_instances_addr = 0;
 
 	const int m_interrupt_event_id;
+	uint64_t  m_lookahead_created = 0; // Pipelines built at the last look-ahead.
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
 };

@@ -15,7 +15,6 @@
 #include <mutex>
 #include <semaphore>
 #include <span>
-#include <thread>
 
 namespace Libs::Graphics {
 
@@ -90,7 +89,7 @@ private:
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
 
 	std::atomic_int m_done_num = 0;
-	std::jthread    m_thread;
+	std::unique_ptr<Common::ThreadWithStack> m_thread;
 
 	friend class CommandProcessor;
 };

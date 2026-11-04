@@ -18,10 +18,23 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <cstdio>
 #include <span>
 #include <vector>
 
 namespace Libs::Graphics {
+
+// Reports pipelines the driver took a while to build, to show what a stall is waiting for.
+static void LogPipelineTime(const char* kind, uint64_t hash,
+                            std::chrono::steady_clock::time_point started) {
+	const auto now = std::chrono::steady_clock::now();
+	const auto ms  = std::chrono::duration<double, std::milli>(now - started).count();
+	if (ms < 50.0) return;
+	std::printf("pipeline-time: %s hash=%016llx %.0f ms\n", kind,
+	            static_cast<unsigned long long>(hash), ms);
+	std::fflush(stdout);
+}
 
 static vk::BlendFactor GetBlendFactor(uint32_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
@@ -356,8 +369,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.pDynamicState       = &dynamic_state;
 	pipeline_info.layout              = pipeline.pipeline_layout;
 
-	const auto result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
-	                                                            nullptr, &pipeline.pipeline);
+	const auto started = std::chrono::steady_clock::now();
+	const auto result  = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
+	                                                             nullptr, &pipeline.pipeline);
+	LogPipelineTime("graphics", 0u, started);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
@@ -392,8 +407,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	info.stage  = comp_shader_stage_info;
 	info.layout = pipeline.pipeline_layout;
 
+	const auto started = std::chrono::steady_clock::now();
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
+	LogPipelineTime("compute", module.info.shader_hash, started);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 

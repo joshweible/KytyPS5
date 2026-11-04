@@ -1,4 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/renderer/pipeline/computePipelineQueue.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -109,6 +111,20 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	message += '\n';
 	Log::WriteToConsoleAndLog(message);
 }
+
+// Set while a look-ahead asks for a program: its descriptors may not be written yet, so a failed
+// lookup means "leave it to the dispatch", and nothing may touch per-draw state.
+thread_local bool t_speculative_lookup = false;
+thread_local bool t_speculative_failed = false;
+
+struct SpeculativeLookup {
+	SpeculativeLookup() {
+		t_speculative_lookup = true;
+		t_speculative_failed = false;
+	}
+	~SpeculativeLookup() { t_speculative_lookup = false; }
+	KYTY_CLASS_NO_COPY(SpeculativeLookup);
+};
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
@@ -281,8 +297,12 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                    specialization));
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	                                                specialization)) {
+		EXIT_IF(!t_speculative_lookup);
+		t_speculative_failed = true;
+		return nullptr;
+	}
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
@@ -363,7 +383,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	    .user_data                  = user_data,
 	    .shader_base                = params.Base(),
 	    .read_specialization_memory = ReadShaderGuestMemory,
-	    .image_heap                 = m_image_heap,
+	    .image_heap                 = t_speculative_lookup ? nullptr : m_image_heap,
 	};
 	ShaderRecompiler::CompileOptions options {.wave_size = input_info.wave_size};
 	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
@@ -408,6 +428,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			module = cached.FindModule<false>(runtime, push_data_cursor);
 		}
 		if (module != nullptr) return bind(*module);
+		if (t_speculative_failed) return nullptr;
 	}
 
 	options.shader_hash     = params.hash;
@@ -450,8 +471,12 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		if (!ShaderRecompiler::IR::MaterializeResources(
+		        program.resource_plan, runtime, program.resources, program.specialization)) {
+			EXIT_IF(!t_speculative_lookup);
+			m_program_cache.erase(entry);
+			return nullptr;
+		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data_cursor)) {
@@ -470,9 +495,13 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
 	WarmUp(shader_store);
+	const auto threads = std::max(std::thread::hardware_concurrency(), 4u) - 2u;
+	m_compute_queue    = std::make_unique<ComputePipelineQueue>(threads, threads);
 }
 
 PipelineCache::~PipelineCache() {
+	// Workers use the driver cache and the pipelines' entries.
+	m_compute_queue.reset();
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& pipeline: pipelines | std::views::values) {
@@ -1070,6 +1099,20 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 
 	const auto& module = *input_info.stage.module;
 
+	if (const auto build = m_compute_builds.find(module.id); build != m_compute_builds.end()) {
+		const auto result = build->second;
+		// Compile here if no worker started it; otherwise wait, ahead of the queued others.
+		if (!m_compute_queue->RunHere(module.id)) {
+			m_compute_queue->Promote(module.id);
+			result.wait();
+		}
+		m_compute_builds.erase(build);
+		auto& pipeline = m_compute_pipelines[module.id];
+		EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
+		CheckpointDriverCache();
+		return pipeline;
+	}
+
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
@@ -1086,8 +1129,65 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
 		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache);
 	}
+	m_compute_pipelines_created++;
 	CheckpointDriverCache();
 
 	return pipeline;
+}
+
+void PipelineCache::StartComputeBuild(const ShaderModule& module) {
+	if (m_compute_queue == nullptr || m_compute_pipelines.contains(module.id)) {
+		return;
+	}
+	// Program::modules can reallocate while the worker reads the module.
+	auto  copy     = std::make_shared<ShaderModule>(module);
+	auto& pipeline = m_compute_pipelines[module.id];
+	m_compute_builds.emplace(
+	    module.id, m_compute_queue->Post(
+	                   module.id,
+	                   [this, copy = std::move(copy), &pipeline] {
+		                   CreatePipelineInternal(m_graphics, pipeline, *copy, m_driver_cache);
+		                   return pipeline.pipeline;
+	                   },
+	                   false));
+	m_compute_pipelines_created++;
+}
+
+void PipelineCache::PrefetchComputePipeline(const HW::ComputeShaderInfo& regs,
+                                            uint32_t                     dispatch_initiator,
+                                            const std::array<uint32_t, 3>* groups) {
+	KYTY_PROFILER_FUNCTION();
+	if (regs.cs_regs.data_addr == 0 || !ShaderIsMapped(regs.cs_regs.data_addr)) {
+		return;
+	}
+	const SpeculativeLookup speculative;
+	// The dispatch applies its wave size only when it executes (CommandProcessor::DispatchDirect).
+	auto cs              = regs;
+	cs.cs_regs.wave_size = Pm4::ComputeWaveSize(dispatch_initiator);
+
+	ShaderComputeInputInfo input_info {};
+	input_info.dispatch_thread_dimensions =
+	    (dispatch_initiator & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+	if (groups != nullptr) {
+		const std::array<uint32_t, 3> sizes {cs.cs_regs.num_thread_x, cs.cs_regs.num_thread_y,
+		                                     cs.cs_regs.num_thread_z};
+		for (uint32_t axis = 0; axis < 3u; ++axis) {
+			const auto size  = std::max(sizes[axis], 1u);
+			const auto count = (*groups)[axis];
+			input_info.workgroup_counts[axis] =
+			    input_info.dispatch_thread_dimensions ? count / size + (count % size != 0u) : count;
+		}
+	}
+	const auto* module = GetComputeProgram(cs, input_info);
+	if (module == nullptr) {
+		return;
+	}
+	// A specialization read from guest memory this early may be a variant the dispatch never
+	// uses: such a compile can take a minute for nothing, so it waits for the dispatch.
+	if (input_info.stage.resources != nullptr &&
+	    !input_info.stage.resources->specialization_reads.empty()) {
+		return;
+	}
+	StartComputeBuild(*module);
 }
 } // namespace Libs::Graphics

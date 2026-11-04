@@ -36,10 +36,14 @@ namespace Libs::Graphics {
 static thread_local Pm4Execution* g_current_execution = nullptr;
 static thread_local GuestGpu*     g_gpu_state         = nullptr;
 
+// Shader translation runs on this thread and recurses with the shader's structure, so give it the
+// same stack on every host.
+constexpr size_t GpuThreadStackSize = size_t {64} << 20u;
+
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
-	m_thread = std::jthread(ThreadRun, this);
+	m_thread = std::make_unique<Common::ThreadWithStack>(ThreadRun, this, GpuThreadStackSize);
 }
 
 GuestGpu::~GuestGpu() {
@@ -57,8 +61,8 @@ void GuestGpu::Shutdown() {
 		m_stopping  = true;
 		m_work_available.SignalAll();
 	}
-	if (m_thread.joinable()) {
-		m_thread.join();
+	if (m_thread) {
+		m_thread->Join();
 	}
 	m_shutdown_complete = true;
 }
@@ -501,6 +505,19 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 		~ExecutionScope() { g_current_execution = nullptr; }
 	} execution_scope(execution);
 
+	// Only after a pipeline was built: ordinary frames never pay for a walk.
+	if (static const bool lookahead = std::getenv("KYTY_DISPATCH_LOOKAHEAD") == nullptr ||
+	                                  std::getenv("KYTY_DISPATCH_LOOKAHEAD")[0] != '0';
+	    lookahead && execution.m_buffer_stack.size() == 1u &&
+	    execution.m_buffer_stack.back().offset_dw == 0u) {
+		const auto created = m_renderer.GetPipelineCache().ComputePipelinesCreated();
+		if (created != m_lookahead_created) {
+			m_lookahead_created = created;
+			RunDispatchLookahead(execution);
+			m_lookahead_created = m_renderer.GetPipelineCache().ComputePipelinesCreated();
+		}
+	}
+
 	ProcessPm4(execution);
 	return execution.m_buffer_stack.empty() ? Pm4ProcessResult::Complete
 	                                        : Pm4ProcessResult::Blocked;
@@ -516,6 +533,86 @@ void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands,
 void CommandProcessor::SuspendPm4() {
 	EXIT_IF(g_current_execution == nullptr);
 	g_current_execution->m_suspended = true;
+}
+
+// Walks the packets of this submission ahead of their execution: a second processor takes the
+// shader register writes, and each dispatch it reaches starts its pipeline on a worker, so a burst
+// of new pipelines compiles in parallel instead of one at a time on this thread.
+void CommandProcessor::RunDispatchLookahead(const Pm4Execution& execution) {
+	KYTY_PROFILER_FUNCTION();
+	constexpr uint32_t MaxDispatches = 256;
+	constexpr uint32_t MaxPackets    = 1u << 16u;
+
+	auto shadow      = std::make_unique<CommandProcessor>(m_renderer, m_interrupt_event_id);
+	shadow->m_sh_ctx = m_sh_ctx;
+
+	auto&    pipelines  = m_renderer.GetPipelineCache();
+	auto     stack      = execution.m_buffer_stack;
+	uint32_t dispatches = 0;
+	for (uint32_t packets = 0; !stack.empty() && dispatches < MaxDispatches && packets < MaxPackets;
+	     packets++) {
+		auto& cursor = stack.back();
+		if (cursor.offset_dw >= cursor.commands.size()) {
+			stack.pop_back();
+			continue;
+		}
+		const auto* packet    = cursor.commands.data() + cursor.offset_dw;
+		const auto  total_dw  = static_cast<uint32_t>(cursor.commands.size());
+		const auto  remaining = total_dw - cursor.offset_dw;
+		const auto  header    = packet[0];
+		if (header == 0x80000000u || Pm4::PacketSizeDw(header) == 1u) {
+			cursor.offset_dw++;
+			continue;
+		}
+		const auto packet_dw = KYTY_PM4_LEN(header);
+		if ((header >> 30u) != 3u || remaining < 2u || packet_dw > remaining || packet_dw == 0u) {
+			break;
+		}
+		const auto opcode = (header >> 8u) & 0xffu;
+		if (opcode == Pm4::IT_SET_SH_REG) {
+			if (g_cp_op_func[opcode](*shadow, header & ~1u, packet + 1, remaining, total_dw) + 1u !=
+			    packet_dw) {
+				break;
+			}
+		} else if (opcode == Pm4::IT_INDIRECT_BUFFER) {
+			// Calls and chains are followed; branches (the 14-dword form) end the walk.
+			if (packet_dw != 4u) {
+				break;
+			}
+			const auto* address = reinterpret_cast<const uint32_t*>(
+			    packet[1] | (static_cast<uint64_t>(packet[2]) << 32u));
+			const auto size  = packet[3] & 0xfffffu;
+			const bool chain = (packet[3] & (1u << 20u)) != 0u;
+			cursor.offset_dw += packet_dw;
+			if (size == 0u) {
+				continue;
+			}
+			if (address == nullptr) {
+				break;
+			}
+			const std::span<const uint32_t> commands(address, size);
+			if (chain) {
+				stack.back() = {commands};
+			} else {
+				stack.push_back({commands});
+			}
+			continue;
+		} else if (opcode == Pm4::IT_DISPATCH_DIRECT) {
+			dispatches++;
+			if (packet_dw == 5u && packet[1] != 0u && packet[2] != 0u && packet[3] != 0u) {
+				const std::array<uint32_t, 3> groups {packet[1], packet[2], packet[3]};
+				pipelines.PrefetchComputePipeline(shadow->m_sh_ctx.GetCs(), packet[4], &groups);
+			}
+		} else if (opcode == Pm4::IT_DISPATCH_INDIRECT) {
+			dispatches++;
+			if ((header & ~1u) == 0xc0021600u) {
+				pipelines.PrefetchComputePipeline(shadow->m_sh_ctx.GetCs(), packet[3], nullptr);
+			} else if ((header & ~1u) == 0xc0011600u) {
+				pipelines.PrefetchComputePipeline(shadow->m_sh_ctx.GetCs(), packet[2], nullptr);
+			}
+		}
+		cursor.offset_dw += packet_dw;
+	}
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {

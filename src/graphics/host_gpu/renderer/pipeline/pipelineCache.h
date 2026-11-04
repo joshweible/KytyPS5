@@ -14,6 +14,9 @@
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 
+#include <array>
+#include <future>
+#include <memory>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -172,6 +175,8 @@ private:
 };
 
 // The owning renderer serializes access, including saves while the GPU is running.
+class ComputePipelineQueue;
+
 class PipelineCache {
 public:
 	// Without a shader store path nothing is kept across runs.
@@ -180,6 +185,14 @@ public:
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
+
+	// Starts building the pipeline a coming dispatch will need on a worker thread, so several
+	// compile at once ahead of the GPU thread reaching them. Speculative: a dispatch whose
+	// resources cannot be read yet is left to the real dispatch.
+	void PrefetchComputePipeline(const HW::ComputeShaderInfo& regs, uint32_t dispatch_initiator,
+	                             const std::array<uint32_t, 3>* groups);
+	// Pipelines built so far, to tell a compile burst from ordinary frames.
+	[[nodiscard]] uint64_t ComputePipelinesCreated() const { return m_compute_pipelines_created; }
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
@@ -250,6 +263,12 @@ private:
 	bool                          m_driver_cache_dirty = false;
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
 	std::unordered_map<uint64_t, Pipeline>                                     m_compute_pipelines;
+	// Pipelines a worker is building, by module id. Their m_compute_pipelines entry fills in when
+	// the build finishes, so a dispatch waits for it here first.
+	std::unordered_map<uint64_t, std::shared_future<vk::Pipeline>>             m_compute_builds;
+	std::unique_ptr<ComputePipelineQueue>                                      m_compute_queue;
+	uint64_t                                                                   m_compute_pipelines_created = 0;
+	void StartComputeBuild(const ShaderModule& module);
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;
 	// Records everything first created; closed without a shader store.
 	ShaderStoreWriter m_store;

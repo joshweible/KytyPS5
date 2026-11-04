@@ -964,7 +964,15 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			    image.indirect_root != ImageResource::NoIndirectImage ||
 			    std::ranges::any_of(program.info.sampled_pairs,
 			                        [&](const auto& pair) { return pair.image == i; })) {
-				return SpecializationFail("FMASK requires a direct image load");
+				// Unsupported use: render this image as an ordinary one rather than end the session.
+				static std::atomic<uint32_t> warnings {0};
+				if (warnings.fetch_add(1u) < 8u) {
+					std::printf("shader 0x%016llx: FMASK format %u on image %u outside a direct load; "
+					            "treating it as a plain image\n",
+					            static_cast<unsigned long long>(program.shader_hash),
+					            static_cast<uint32_t>(format), i);
+				}
+				image.fmask = false;
 			}
 		}
 		// See ReadsDepthBits; raw loads only, since filtering would blend the codes.
