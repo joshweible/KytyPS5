@@ -1950,6 +1950,17 @@ int KYTY_SYSV_ABI Bind(int s, const void* addr, uint32_t addrlen) {
 	if (ConvertGuestSockaddr(addr, addrlen, &host_addr, &host_addrlen) != 0) {
 		return -1;
 	}
+	// A game binds its sockets whether or not it goes online. With no network configured they
+	// stay on this machine, where binding them does not raise a firewall prompt.
+	if (auto* in = reinterpret_cast<sockaddr_in*>(&host_addr);
+	    !Config::IsNetworkConnected() && host_addr.ss_family == AF_INET) {
+		uint32_t bound = 0;
+		std::memcpy(&bound, &in->sin_addr, sizeof(bound));
+		if (bound == htonl(INADDR_ANY)) {
+			bound = htonl(INADDR_LOOPBACK);
+			std::memcpy(&in->sin_addr, &bound, sizeof(bound));
+		}
+	}
 
 	if (state.p2p) {
 		if (addrlen < 16) {
