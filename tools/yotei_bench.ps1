@@ -11,6 +11,7 @@ param(
 	[int]$Runs = 1,
 	[string[]]$Override = @(),
 	[hashtable]$Env = @{},
+	[string]$Shot = '', # Saves the game window here at the end of the run.
 	[int]$Windows = 4,
 	[int]$WindowSeconds = 15,
 	[int]$TimeoutSeconds = 420,
@@ -77,6 +78,43 @@ for ($run = 1; $run -le $Runs; $run++) {
 			if ($settled -ge 0) { $settle_time = [int]$clock.Elapsed.TotalSeconds }
 		}
 		if ($settled -ge 0 -and $all.Count -ge $settled + $Windows) { $status = 'ok'; break }
+	}
+	if ($Shot -and -not $process.HasExited) {
+		Add-Type -AssemblyName System.Drawing
+		Add-Type -Name Window -Namespace Bench -MemberDefinition @'
+delegate bool EnumProc(IntPtr window, IntPtr parameter);
+[DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+[DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+[DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint id);
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, int[] rect);
+public static IntPtr Largest(uint process) {
+	IntPtr best = IntPtr.Zero;
+	long   area = 0;
+	EnumWindows((window, parameter) => {
+		uint id;
+		GetWindowThreadProcessId(window, out id);
+		var rect = new int[4];
+		if (id == process && IsWindowVisible(window) && GetWindowRect(window, rect)) {
+			long size = (long)(rect[2] - rect[0]) * (rect[3] - rect[1]);
+			if (size > area) { area = size; best = window; }
+		}
+		return true;
+	}, IntPtr.Zero);
+	return best;
+}
+'@
+		[void][Bench.Window]::SetProcessDPIAware() # Window rects are scaled otherwise.
+		$handle = [Bench.Window]::Largest([uint32]$process.Id)
+		[void][Bench.Window]::SetForegroundWindow($handle)
+		Start-Sleep 2
+		$rect = New-Object int[] 4
+		[void][Bench.Window]::GetWindowRect($handle, $rect)
+		$image = New-Object System.Drawing.Bitmap ($rect[2] - $rect[0]), ($rect[3] - $rect[1])
+		$canvas = [System.Drawing.Graphics]::FromImage($image)
+		$canvas.CopyFromScreen($rect[0], $rect[1], 0, 0, $image.Size)
+		$image.Save($Shot)
 	}
 	if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit(30000) | Out-Null }
 	$all = Read-Windows $stdout

@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_BUFFERCACHE_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_BUFFERCACHE_H_
 
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "common/abi.h"
 #include "common/common.h"
 #include "common/lruCache.h"
@@ -53,6 +54,13 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// The GPU thread finished a PM4 packet, so the writes it obtained have all been recorded.
+	void EndPacket() {
+		if (!m_open_writes.empty()) {
+			CloseWrites();
+		}
+	}
+	void SetWriteKind(BenchStats::WriteKind kind) noexcept { m_write_kind_now = kind; }
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
@@ -66,6 +74,7 @@ public:
 			case MemoryUsage::Stream: return m_stream_buffer;
 			case MemoryUsage::Download: return m_download_buffer;
 			case MemoryUsage::DeviceLocal: return m_device_buffer;
+			case MemoryUsage::Shared: break;
 		}
 		EXIT("BufferCache: invalid utility-buffer usage\n");
 	}
@@ -93,6 +102,24 @@ public:
 	void               RunGarbageCollector();
 
 private:
+	static constexpr uint64_t WriteTickShift = 16;
+	static constexpr uint64_t WriteTickSlots = 1u << 16u;
+	struct OpenWrite {
+		uint64_t vaddr;
+		uint64_t size;
+	};
+	// Tick of the last GPU write to each 64 KiB of guest memory, hashed by address. A collision
+	// only makes a read wait for more than it had to.
+	std::vector<uint64_t>  m_write_ticks = std::vector<uint64_t>(WriteTickSlots, 0);
+	std::vector<uint8_t>   m_write_kinds = std::vector<uint8_t>(WriteTickSlots, 0);
+	BenchStats::WriteKind  m_write_kind_now = BenchStats::WriteBinding;
+	std::vector<OpenWrite> m_open_writes; // Obtained by the packet in progress, maybe unrecorded.
+	void               NoteWrite(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool IsWriteOpen(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] uint64_t LastWriteTick(uint64_t vaddr, uint64_t size) const;
+	void               CloseWrites();
+	[[nodiscard]] uint64_t PendingWriter(uint64_t vaddr, uint64_t size);
+	bool               ReadMapped(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	friend struct BufferCacheTestAccess;
 
 	bool IsBufferInvalid(BufferId id) const { return !id || m_slot_buffers[id].is_deleted; }

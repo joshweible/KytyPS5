@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -378,6 +380,7 @@ void GuestGpu::ThreadRun(void* data) {
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         should_stop = false;
+		const auto                   idle_from   = std::chrono::steady_clock::now();
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
@@ -421,6 +424,11 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_processing = true;
 			}
 		}
+		BenchStats::AddGpuThreadTime(
+		    BenchStats::GpuIdle,
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                              std::chrono::steady_clock::now() - idle_from)
+		                              .count()));
 		if (should_stop) {
 			gpu->m_gfx_cp->BufferWait();
 			g_gpu_state = nullptr;
@@ -617,7 +625,18 @@ void CommandProcessor::RunDispatchLookahead(const Pm4Execution& execution) {
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
+	auto       packet_kind = BenchStats::GpuOther;
+	auto       packet_from = std::chrono::steady_clock::now();
 	while (!execution.m_buffer_stack.empty()) {
+		m_renderer.GetBufferCache().EndPacket();
+		{
+			const auto now = std::chrono::steady_clock::now();
+			BenchStats::AddGpuThreadTime(
+			    packet_kind, static_cast<uint64_t>(
+			                     std::chrono::duration_cast<std::chrono::nanoseconds>(now - packet_from)
+			                         .count()));
+			packet_from = now;
+		}
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
@@ -632,6 +651,16 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        remaining_dw  = total_dw - cursor.offset_dw;
 		const auto        packet_header = packet[0];
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
+		packet_kind = opcode == Pm4::IT_DISPATCH_DIRECT || opcode == Pm4::IT_DISPATCH_INDIRECT
+		                  ? BenchStats::GpuDispatch
+		              : opcode == Pm4::IT_DRAW_INDEX_2 || opcode == Pm4::IT_DRAW_INDEX_AUTO ||
+		                      opcode == Pm4::IT_DRAW_INDEX_OFFSET_2 || opcode == Pm4::IT_DRAW_INDIRECT ||
+		                      opcode == Pm4::IT_DRAW_INDEX_INDIRECT ||
+		                      opcode == Pm4::IT_DRAW_INDIRECT_MULTI ||
+		                      opcode == Pm4::IT_DRAW_INDEX_INDIRECT_MULTI ||
+		                      opcode == Pm4::IT_DISPATCH_DRAW
+		                  ? BenchStats::GpuDraw
+		                                    : BenchStats::GpuOther;
 
 		if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
 			cursor.offset_dw++;

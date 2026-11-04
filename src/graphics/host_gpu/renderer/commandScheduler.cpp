@@ -351,6 +351,16 @@ void CommandScheduler::ReadTimestamps(uint32_t slot) {
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 
+	// A timeline wait does not make GPU writes visible to the host, and reads of mapped game
+	// buffers rely on one being enough. Every submission ends with that domain operation.
+	m_command.EndRendering();
+	vk::MemoryBarrier to_host {};
+	to_host.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+	to_host.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	m_command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                                   vk::PipelineStageFlagBits::eHost, {}, 1, &to_host, 0,
+	                                   nullptr, 0, nullptr);
+
 	if (m_timestamp_slot != UINT32_MAX) {
 		WriteEndTimestamp();
 	}

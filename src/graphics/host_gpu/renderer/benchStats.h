@@ -14,6 +14,10 @@ void               AddGpuTime(uint64_t busy_ns, uint64_t gap_ns);
 // handler, so it only touches a fixed table.
 // One read of memory the GPU may have written: time queued for the GPU thread, time waiting for
 // the GPU, time publishing the data, bytes copied (0: nothing was GPU-written).
+enum GpuThreadTime : uint32_t { GpuIdle, GpuDraw, GpuDispatch, GpuOther, GpuThreadTimes };
+void AddGpuThreadTime(GpuThreadTime kind, uint64_t ns);
+enum WriteKind : uint32_t { WriteBinding, WriteFill, WriteCopy, WriteImage, WriteKinds };
+void NoteWriteKind(WriteKind kind); // The kind of write behind a read that had to wait.
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

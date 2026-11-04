@@ -18,9 +18,11 @@
 #include <chrono>
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <immintrin.h>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -155,6 +157,139 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	} else {
 		m_slot_buffers.erase(id);
 	}
+}
+
+namespace {
+
+constexpr uint64_t ReadLine = 64;
+
+// Mapped VRAM is write-combined: a plain load is uncached, one PCIe round trip per 16 bytes. A
+// streaming load fills a whole line in one trip. Both pointers are line aligned.
+__attribute__((target("avx2"))) void StreamLoad(uint8_t* dst, const uint8_t* src, uint64_t bytes) {
+	_mm_mfence();
+	for (uint64_t i = 0; i < bytes; i += ReadLine) {
+		const auto low  = _mm256_stream_load_si256(reinterpret_cast<const __m256i*>(src + i));
+		const auto high = _mm256_stream_load_si256(reinterpret_cast<const __m256i*>(src + i + 32));
+		_mm256_store_si256(reinterpret_cast<__m256i*>(dst + i), low);
+		_mm256_store_si256(reinterpret_cast<__m256i*>(dst + i + 32), high);
+	}
+	_mm_mfence();
+}
+
+alignas(ReadLine) thread_local uint8_t t_read_lines[64 * 1024];
+
+void PublishMapped(uint64_t address, const uint8_t* mapped, uint64_t bytes) {
+	while (bytes != 0) {
+		const auto line  = reinterpret_cast<uint64_t>(mapped);
+		const auto first = Common::AlignDown(line, ReadLine);
+		const auto skip  = line - first;
+		const auto chunk = std::min<uint64_t>(bytes, sizeof(t_read_lines) - skip);
+		StreamLoad(t_read_lines, reinterpret_cast<const uint8_t*>(first),
+		           Common::AlignUp(skip + chunk, ReadLine));
+		Libs::LibKernel::Memory::WriteBacking(address, t_read_lines + skip, chunk);
+		address += chunk;
+		mapped += chunk;
+		bytes -= chunk;
+	}
+}
+
+} // namespace
+
+void BufferCache::NoteWrite(uint64_t vaddr, uint64_t size) {
+	const auto tick  = m_scheduler.CurrentTick();
+	const auto first = vaddr >> WriteTickShift;
+	const auto count = ((vaddr + size - 1u) >> WriteTickShift) - first + 1u;
+	for (uint64_t i = 0; i < std::min(count, WriteTickSlots); i++) {
+		m_write_ticks[(first + i) & (WriteTickSlots - 1u)] = tick;
+		m_write_kinds[(first + i) & (WriteTickSlots - 1u)] = static_cast<uint8_t>(m_write_kind_now);
+	}
+}
+
+bool BufferCache::IsWriteOpen(uint64_t vaddr, uint64_t size) const {
+	return std::any_of(m_open_writes.begin(), m_open_writes.end(), [&](const OpenWrite& write) {
+		return write.vaddr < vaddr + size && vaddr < write.vaddr + write.size;
+	});
+}
+
+uint64_t BufferCache::LastWriteTick(uint64_t vaddr, uint64_t size) const {
+	const auto first = vaddr >> WriteTickShift;
+	const auto count = ((vaddr + size - 1u) >> WriteTickShift) - first + 1u;
+	uint64_t   tick  = 0;
+	for (uint64_t i = 0; i < std::min(count, WriteTickSlots); i++) {
+		tick = std::max(tick, m_write_ticks[(first + i) & (WriteTickSlots - 1u)]);
+	}
+	return tick;
+}
+
+void BufferCache::CloseWrites() {
+	for (const auto& write: m_open_writes) {
+		NoteWrite(write.vaddr, write.size);
+	}
+	m_open_writes.clear();
+}
+
+// The unfinished tick behind the GPU-written data in this range, submitted so that any thread can
+// wait for it, or 0 if there is none.
+uint64_t BufferCache::PendingWriter(uint64_t vaddr, uint64_t size) {
+	uint64_t tick = 0;
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			    tick = std::max(tick, LastWriteTick(start, end - start));
+		    });
+	    });
+	if (tick == 0 || m_scheduler.IsFree(tick)) {
+		return 0;
+	}
+	if (tick == m_scheduler.CurrentTick()) {
+		m_scheduler.Flush();
+	}
+	return tick;
+}
+
+// Copies what the GPU wrote straight out of the buffer's mapping. Waits for the buffer's last
+// writer alone, where a download would have to wait for everything recorded so far.
+bool BufferCache::ReadMapped(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
+		                                           "mapped read");
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			    ranges.emplace_back(start, end - start);
+		    });
+		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ForgetColorMetadataChecks(address, bytes);
+	    });
+	if (ranges.empty()) {
+		return false;
+	}
+	const auto clock = [] {
+		return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+	};
+	uint64_t tick = 0;
+	for (const auto& [address, bytes]: ranges) {
+		tick = std::max(tick, LastWriteTick(address, bytes));
+	}
+	BenchStats::NoteWriter(m_scheduler.IsFree(tick));
+	if (!m_scheduler.IsFree(tick) && BenchStats::Enabled()) {
+		BenchStats::NoteWriteKind(static_cast<BenchStats::WriteKind>(
+		    m_write_kinds[(ranges.front().first >> WriteTickShift) & (WriteTickSlots - 1u)]));
+	}
+	const auto begin = clock();
+	m_scheduler.Wait(tick);
+	m_scheduler.WaitPriorityOperations(tick);
+	const auto waited = clock();
+	const auto mapped = buffer.Mapped();
+	for (const auto& [address, bytes]: ranges) {
+		const auto offset = address - buffer.CpuAddress();
+		buffer.Invalidate(offset, bytes);
+		PublishMapped(address, mapped.data() + offset, bytes);
+		t_read_bytes += bytes;
+	}
+	t_read_wait_ns += waited - begin;
+	t_read_copy_ns += clock() - waited;
+	return true;
 }
 
 template <bool async>
@@ -313,35 +448,56 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	const auto clock = [] {
 		return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 	};
-	const auto requested  = clock();
 	const bool gpu_thread = GuestGpu::IsGpuThread();
 	const auto fault_pc   = BenchStats::FaultPc();
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, requested,
-	                                                gpu_thread, clock, fault_pc] {
+	uint64_t   queued     = 0;
+	uint64_t   waited     = 0;
+	// A game thread's read waits for its writer out here, where it doesn't hold up the GPU thread's
+	// recording. Writers that keep arriving end up waited for on the GPU thread, as a last resort.
+	constexpr int WaitPasses = 3;
+	for (int pass = 0;; pass++) {
+		uint64_t   writer    = 0;
+		const auto requested = clock();
+		m_scheduler.Context().GetGpu().SendCommandSync([&] {
 		const auto started = clock();
+		queued += started - requested;
 		BenchStats::SetFaultPc(fault_pc);
 		t_read_wait_ns = t_read_copy_ns = t_read_bytes = 0;
 		struct Report {
-			uint64_t vaddr, requested, started;
-			bool     is_write, gpu_thread;
+			uint64_t vaddr, queued, waited;
+			bool     is_write, gpu_thread, skip;
 			~Report() {
-				if (BenchStats::Enabled()) {
-					BenchStats::NoteRead(vaddr, is_write, gpu_thread, started - requested,
-					                     t_read_wait_ns, t_read_copy_ns, t_read_bytes);
+				if (BenchStats::Enabled() && !skip) {
+					BenchStats::NoteRead(vaddr, is_write, gpu_thread, queued,
+					                     waited + t_read_wait_ns, t_read_copy_ns, t_read_bytes);
 				}
 			}
-		} report {vaddr, requested, started, is_write, gpu_thread};
+		} report {vaddr, queued, waited, is_write, gpu_thread, false};
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 		if (IsRegionGpuModified(vaddr, size)) {
-			BenchStats::NoteWriter(m_scheduler.IsFree(buffer.last_write_tick));
 			const auto start =
 			    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
 			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 			                          buffer.CpuAddress() + buffer.Size());
-			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			static const bool direct_reads = [] {
+				const char* value = std::getenv("KYTY_DIRECT_READS");
+				return value == nullptr || value[0] != '0';
+			}();
+			// A read inside a packet may precede a write that packet has only obtained so far.
+			const bool direct =
+			    direct_reads && !buffer.Mapped().empty() && !IsWriteOpen(start, end - start);
+			if (direct && !gpu_thread && pass < WaitPasses) {
+				writer = PendingWriter(start, end - start);
+				if (writer != 0) {
+					report.skip = true;
+					return;
+				}
+			}
+			if (direct ? ReadMapped(buffer, start, end - start)
+			           : DownloadBufferMemory<false>(buffer, start, end - start)) {
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 			}
 		}
@@ -349,7 +505,14 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 			QueueBdaSync(vaddr, size);
 		}
-	});
+		});
+		if (writer == 0) {
+			return;
+		}
+		const auto wait_from = clock();
+		m_scheduler.WaitSubmitted(writer);
+		waited += clock() - wait_from;
+	}
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -430,6 +593,7 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 	}
 	new_buffer.CopyFrom(m_scheduler.Current(), overlap, 0,
 	                    overlap.CpuAddress() - new_buffer.CpuAddress(), overlap.Size());
+	NoteWrite(overlap.CpuAddress(), overlap.Size());
 	DeleteBuffer(overlap_id);
 }
 
@@ -440,7 +604,7 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	const auto overlap = ResolveOverlaps(vaddr, size);
 
 	const auto id = m_slot_buffers.insert(
-	    m_graphics, m_scheduler, MemoryUsage::DeviceLocal, overlap.begin,
+	    m_graphics, m_scheduler, MemoryUsage::Shared, overlap.begin,
 	    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, overlap.end - overlap.begin);
 	const auto& buffer = m_slot_buffers[id];
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
@@ -545,7 +709,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
-		buffer.last_write_tick = m_scheduler.CurrentTick();
+		NoteWrite(vaddr, size);
+		m_open_writes.push_back({vaddr, size});
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
 	}
@@ -598,7 +763,9 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	}
 
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
+	m_write_kind_now       = BenchStats::WriteFill;
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
+	m_write_kind_now       = BenchStats::WriteBinding;
 	dst->Fill(dst_offset, size, value);
 }
 
@@ -630,8 +797,10 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	const auto dst_id      = dst_memory ? FindBuffer(dst_vaddr, size) : BufferId {};
 	auto [src, src_offset] = src_memory ? ObtainBuffer(src_vaddr, size, false, true, src_id)
 	                                    : std::pair {&m_gds_buffer, src_vaddr};
+	m_write_kind_now       = BenchStats::WriteCopy;
 	auto [dst, dst_offset] = dst_memory ? ObtainBuffer(dst_vaddr, size, true, true, dst_id)
 	                                    : std::pair {&m_gds_buffer, dst_vaddr};
+	m_write_kind_now = BenchStats::WriteBinding;
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
 }
 

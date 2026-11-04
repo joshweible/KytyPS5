@@ -711,8 +711,10 @@ bool Publish(TextureCache& cache, Image& image) {
 		return false;
 	}
 	// ObtainBuffer preserves padding and records ownership before the GPU-only transfer.
+	cache.m_buffer_cache.SetWriteKind(BenchStats::WriteImage);
 	auto [buffer, offset] =
 	    cache.m_buffer_cache.ObtainBuffer(image.info.data.address, image.info.data.size, true);
+	cache.m_buffer_cache.SetWriteKind(BenchStats::WriteBinding);
 	cache.DownloadImage(image, *buffer, offset, image.info.data.size, image.info.resources.levels);
 	image.ClearGpuModified();
 	image.MarkBufferModified();

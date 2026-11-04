@@ -26,6 +26,7 @@ enum class MemoryUsage : uint8_t {
 	Upload,
 	Download,
 	Stream,
+	Shared, // VRAM the CPU can map too. Plain DeviceLocal where the GPU has no resizable BAR.
 };
 
 inline constexpr vk::BufferUsageFlags ReadFlags =
@@ -38,7 +39,6 @@ inline constexpr vk::BufferUsageFlags AllFlags =
 
 class Buffer {
 public:
-	uint64_t last_write_tick = 0; // Tick of the latest GPU write recorded to this buffer.
 
 	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
 	       uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size);

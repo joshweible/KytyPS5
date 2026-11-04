@@ -32,6 +32,8 @@ public:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
 	void                      Wait(uint64_t tick);
+	// For any thread, for a tick that is already submitted.
+	void                      WaitSubmitted(uint64_t tick) { m_master.Wait(tick); }
 	void                      PopPendingOperations();
 	void                      DrainPriorityOperations();
 	void                      WaitPriorityOperations(uint64_t tick);

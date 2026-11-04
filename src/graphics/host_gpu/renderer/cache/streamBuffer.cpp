@@ -24,6 +24,7 @@ constexpr vk::AccessFlags MEMORY_ACCESS =
 	switch (usage) {
 		case MemoryUsage::Upload:
 		case MemoryUsage::Stream:
+		case MemoryUsage::Shared:
 			return VMA_ALLOCATION_CREATE_MAPPED_BIT |
 			       VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 		case MemoryUsage::Download:
@@ -36,11 +37,28 @@ constexpr vk::AccessFlags MEMORY_ACCESS =
 [[nodiscard]] VmaMemoryUsage AllocationUsage(MemoryUsage usage) {
 	switch (usage) {
 		case MemoryUsage::DeviceLocal:
-		case MemoryUsage::Stream: return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+		case MemoryUsage::Stream:
+		case MemoryUsage::Shared: return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 		case MemoryUsage::Upload:
 		case MemoryUsage::Download: return VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
 	}
 	return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+}
+
+// Resizable BAR: the CPU can reach all of VRAM, not just a small window of it.
+[[nodiscard]] bool HasLargeBar(const GraphicContext& graphics) {
+	constexpr VkMemoryPropertyFlags Wanted =
+	    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+	const VkPhysicalDeviceMemoryProperties* memory = nullptr;
+	vmaGetMemoryProperties(graphics.allocator, &memory);
+	for (uint32_t i = 0; i < memory->memoryTypeCount; i++) {
+		const auto& type = memory->memoryTypes[i];
+		if ((type.propertyFlags & Wanted) == Wanted &&
+		    memory->memoryHeaps[type.heapIndex].size >= 1024ull * 1024ull * 1024ull) {
+			return true;
+		}
+	}
+	return false;
 }
 
 [[nodiscard]] bool AlignUp(uint64_t value, uint64_t alignment, uint64_t& result) {
@@ -70,19 +88,32 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	buffer_info.usage       = flags;
 
 	const bool with_bda = bool(flags & vk::BufferUsageFlagBits::eShaderDeviceAddress);
-	VmaAllocationCreateInfo allocation_info {};
-	allocation_info.flags =
-	    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | AllocationFlags(usage);
-	allocation_info.usage = AllocationUsage(usage);
-	allocation_info.preferredFlags = usage == MemoryUsage::DeviceLocal
-	                                     ? VkMemoryPropertyFlags {}
-	                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
-	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(
-	    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info), &allocation_info,
-	    &native_buffer, &m_allocation, &allocation_result));
+	const auto        allocate      = [&](MemoryUsage kind) {
+		VmaAllocationCreateInfo allocation_info {};
+		allocation_info.flags =
+		    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | AllocationFlags(kind);
+		allocation_info.usage          = AllocationUsage(kind);
+		allocation_info.preferredFlags = kind == MemoryUsage::DeviceLocal
+		                                     ? VkMemoryPropertyFlags {}
+		                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		if (kind == MemoryUsage::Shared) {
+			allocation_info.requiredFlags =
+			    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+		}
+		return static_cast<vk::Result>(vmaCreateBuffer(
+		    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info),
+		    &allocation_info, &native_buffer, &m_allocation, &allocation_result));
+	};
+	if (usage == MemoryUsage::Shared && !HasLargeBar(graphics)) {
+		m_usage = MemoryUsage::DeviceLocal;
+	}
+	auto result = allocate(m_usage);
+	if (result != vk::Result::eSuccess && m_usage == MemoryUsage::Shared) {
+		m_usage = MemoryUsage::DeviceLocal;
+		result  = allocate(m_usage);
+	}
 	if (result != vk::Result::eSuccess) {
 		graphics.LogMemoryBudget();
 	}
@@ -121,7 +152,7 @@ void Buffer::Flush(uint64_t offset, uint64_t size) {
 }
 
 void Buffer::Invalidate(uint64_t offset, uint64_t size) {
-	EXIT_IF(m_usage != MemoryUsage::Download || offset > Size() || size > Size() - offset);
+	EXIT_IF(m_mapped.empty() || offset > Size() || size > Size() - offset);
 	if (!IsCoherent() && size != 0) {
 		const auto result =
 		    vmaInvalidateAllocation(m_graphics->allocator, m_allocation, offset, size);
