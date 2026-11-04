@@ -423,6 +423,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			options.back_code     = params.back_code;
 			const auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 			if (FILE* file = std::fopen(fmt::format("{}/{}.ir", dump_ir, text).c_str(), "w")) {
+				std::fprintf(file, "dispatcher_fallback=%d blocks=%zu\n",
+				             translated.program.dispatcher_fallback ? 1 : 0,
+				             translated.program.blocks.size());
 				std::fputs(ShaderRecompiler::IR::ProgramToString(translated.program).c_str(), file);
 				std::fclose(file);
 			}
