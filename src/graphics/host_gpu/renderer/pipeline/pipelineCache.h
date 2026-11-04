@@ -211,7 +211,8 @@ public:
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                      ShaderComputeInputInfo&      input_info);
 
-	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
+	// Null while a worker builds it: the draw is skipped, so a new pipeline never stalls the frame.
+	Pipeline* GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
 	// Null while the pipeline is still compiling: the dispatch is skipped, not waited for.
 	Pipeline* GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
@@ -268,6 +269,8 @@ private:
 	// Pipelines a worker is building, by module id. Their m_compute_pipelines entry fills in when
 	// the build finishes, so a dispatch waits for it here first.
 	std::unordered_map<uint64_t, std::shared_future<vk::Pipeline>>             m_compute_builds;
+	std::unordered_map<GraphicsPipelineKey, std::shared_future<vk::Pipeline>, GraphicsPipelineKeyHash>
+	    m_graphics_builds;
 	std::unique_ptr<ComputePipelineQueue>                                      m_compute_queue;
 	std::unordered_set<uint64_t>                                               m_compute_skipped;
 	uint64_t                                                                   m_compute_pipelines_created = 0;

@@ -411,17 +411,18 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	m_lookup_key.hash            = params.hash;
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
-	// KYTY_DUMP_IR=<hash>:<file>: writes that shader's IR once.
-	static const char* const dump = std::getenv("KYTY_DUMP_IR");
-	if (dump != nullptr) {
-		static bool dumped = false;
-		if (!dumped && std::strtoull(dump, nullptr, 16) == params.hash) {
-			dumped                  = true;
-			options.shader_hash     = params.hash;
-			options.user_data       = user_data;
-			options.back_code       = params.back_code;
+	// KYTY_DUMP_IR=<directory>: writes the IR of the shaders in KYTY_DUMP_IR_HASHES once each.
+	static const char* const dump_ir = std::getenv("KYTY_DUMP_IR");
+	if (dump_ir != nullptr) {
+		static std::unordered_set<uint64_t> dumped;
+		const auto text = fmt::format("{:016x}", params.hash);
+		if (std::strstr(std::getenv("KYTY_DUMP_IR_HASHES"), text.c_str()) != nullptr &&
+		    dumped.insert(params.hash).second) {
+			options.shader_hash   = params.hash;
+			options.user_data     = user_data;
+			options.back_code     = params.back_code;
 			const auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
-			if (FILE* file = std::fopen(std::strchr(dump, ':') + 1, "w")) {
+			if (FILE* file = std::fopen(fmt::format("{}/{}.ir", dump_ir, text).c_str(), "w")) {
 				std::fputs(ShaderRecompiler::IR::ProgramToString(translated.program).c_str(), file);
 				std::fclose(file);
 			}
@@ -926,7 +927,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	return GetProgram(params, input_info, push_data_cursor);
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&   command,
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&   command,
                                                             const DrawRenderState& state) {
 	const auto* colors        = state.color_info;
 	const auto& depth         = state.depth_info;
@@ -1096,27 +1097,52 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
 	auto& pipeline        = iter->second;
-	if (!inserted) {
-		return pipeline;
-	}
-
-	if (graphics_debug_dump_enabled()) {
-		ShaderDbgDumpInputInfo(vs_input_info);
-		if (ps_active) {
-			ShaderDbgDumpInputInfo(ps_input_info);
+	if (inserted) {
+		if (graphics_debug_dump_enabled()) {
+			ShaderDbgDumpInputInfo(vs_input_info);
+			if (ps_active) {
+				ShaderDbgDumpInputInfo(ps_input_info);
+			}
 		}
+		// Program::modules can reallocate while the worker reads the modules.
+		std::array<std::shared_ptr<const ShaderModule>, 4> copies;
+		for (size_t i = 0; i < stages.size(); i++) {
+			if (stages[i] != nullptr) {
+				copies[i] = std::make_shared<const ShaderModule>(*stages[i]);
+			}
+		}
+		m_graphics_builds.emplace(
+		    key, m_compute_queue->Post(
+		             GraphicsPipelineKeyHash {}(key),
+		             [this, &pipeline, &key = iter->first, copies = std::move(copies)] {
+			             std::array<const ShaderModule*, 4> modules {};
+			             for (size_t i = 0; i < copies.size(); i++) {
+				             modules[i] = copies[i].get();
+			             }
+			             Common::DebugCounters::ScopedTimer timer(
+			                 Common::DebugCounters::Counter::PipelinesCreated,
+			                 Common::DebugCounters::Counter::PipelineCreateNs,
+			                 Common::DebugCounters::Peak::PipelineCreateNs);
+			             CreatePipelineInternal(m_graphics, pipeline, key, modules, m_driver_cache);
+			             return pipeline.pipeline;
+		             },
+		             false));
 	}
-
-	{
-		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
-		                                         Common::DebugCounters::Counter::PipelineCreateNs,
-		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
+	const auto build = m_graphics_builds.find(key);
+	if (build == m_graphics_builds.end()) {
+		return &pipeline;
 	}
+	// A driver cache hit takes a moment, and drawing it now avoids a missing object for a frame.
+	if (build->second.wait_for(inserted ? std::chrono::milliseconds(5)
+	                                    : std::chrono::milliseconds(0)) !=
+	    std::future_status::ready) {
+		return nullptr;
+	}
+	m_graphics_builds.erase(build);
+	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 	StorePipeline(key);
 	CheckpointDriverCache();
-
-	return pipeline;
+	return &pipeline;
 }
 
 PipelineCache::Pipeline* PipelineCache::GetComputePipeline(
