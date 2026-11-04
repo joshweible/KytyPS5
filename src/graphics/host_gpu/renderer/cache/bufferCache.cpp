@@ -845,6 +845,10 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
 
+bool BufferCache::IsWritePending(uint64_t vaddr, uint64_t size) {
+	return HasGpuDirtyBytes(vaddr, size) && !m_scheduler.IsFree(LastWriteTick(vaddr, size));
+}
+
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
 }

@@ -1602,8 +1602,9 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	return plan;
 }
 
-bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runtime,
+                            ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                            bool allow_late_words) {
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
@@ -1614,7 +1615,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	     std::ranges::any_of(program.descriptor_sources, uses_workgroup_count));
 	auto& reads = snapshot.specialization_reads;
 	reads = program.source_reads;
-	if (!WalkSrt(program, runtime, snapshot.flattened_srt, capture_reads ? &reads : nullptr)) {
+	snapshot.late_words.clear();
+	if (!WalkSrt(program, runtime, snapshot.flattened_srt, capture_reads ? &reads : nullptr,
+	             allow_late_words ? &snapshot.late_words : nullptr)) {
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
@@ -1826,6 +1829,14 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	store_slots(specialization.images, program.info.images.size());
 	store_slots(specialization.samplers, program.info.samplers.size());
 	return true;
+}
+
+bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	if (MaterializeOnce(program, runtime, snapshot, specialization, true)) return true;
+	// Conservative control flow can reach what it cannot resolve; the true values always can.
+	return SrtWalkerSkippedLateWord() &&
+	       MaterializeOnce(program, runtime, snapshot, specialization, false);
 }
 
 uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {

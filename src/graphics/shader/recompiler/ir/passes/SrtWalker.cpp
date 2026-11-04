@@ -168,16 +168,36 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+thread_local std::vector<std::pair<uint32_t, uint64_t>>* t_late_words = nullptr;
+thread_local bool t_skipped_late_word = false;
+// A value's state byte: left unknown by a late word, with its address in the value's slot.
+constexpr int LateWordState = 4;
 
 // Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
-// Bit 32 is set when the word was read for the walker. Taking the page fault instead costs
-// microseconds, and SRT tables often share pages with GPU output.
-uint64_t KYTY_SYSV_ABI ReadTrappedWord(uint64_t address) {
+// Bit 32 is set when the word was read for the walker, bit 33 when it is a late word to leave
+// unknown. Taking the page fault instead costs microseconds, and SRT tables often share pages with
+// GPU output.
+uint64_t KYTY_SYSV_ABI ReadTrappedWord(uint64_t address, uint64_t may_skip) {
 	uint32_t word = 0;
-	return LibKernel::Memory::TryReadGpuCleanWord(address, word) ? (uint64_t {1} << 32u) | word : 0u;
+	if (LibKernel::Memory::TryReadGpuCleanWord(address, word)) {
+		return (uint64_t {1} << 32u) | word;
+	}
+	if (may_skip != 0u && t_late_words != nullptr && LibKernel::Memory::IsGpuWritePending(address)) {
+		t_skipped_late_word = true;
+		return uint64_t {2} << 32u;
+	}
+	return 0u;
 }
 
-void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
+void KYTY_SYSV_ABI NoteLateWord(uint64_t flat_index, uint64_t address) {
+	if (t_late_words != nullptr) {
+		t_late_words->emplace_back(static_cast<uint32_t>(flat_index), address);
+	}
+}
+
+// A may_skip load that meets a late word sets the value's state and slot and leaves through skip.
+void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address, bool may_skip,
+               const Xbyak::Label& skip, uint32_t state, uint32_t slot) {
 	namespace Memory = LibKernel::Memory;
 	Xbyak::Label load, done;
 	code.lea(code.r10, code.ptr[address]);
@@ -193,13 +213,19 @@ void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
 	code.mov(code.rbp, code.rsp);
 	code.and_(code.rsp, -16);
 	code.mov(code.rdi, code.r10);
+	code.mov(code.esi, may_skip ? 1 : 0);
 	code.mov(code.rax, reinterpret_cast<uint64_t>(&ReadTrappedWord));
 	code.call(code.rax);
 	code.mov(code.rsp, code.rbp);
 	for (const auto& reg: {code.rbp, code.r10, code.r8, code.rdx, code.rsi, code.rdi}) code.pop(reg);
 	code.mov(code.rcx, code.rax);
 	code.shr(code.rcx, 32);
-	code.jnz(done, Xbyak::CodeGenerator::T_NEAR);
+	code.jz(load, Xbyak::CodeGenerator::T_NEAR);
+	code.cmp(code.rcx, 1);
+	code.je(done, Xbyak::CodeGenerator::T_NEAR);
+	code.mov(code.byte[code.rdx + state], LateWordState);
+	code.mov(code.qword[code.rdx + slot], code.r10);
+	code.jmp(skip, Xbyak::CodeGenerator::T_NEAR);
 	code.L(load);
 	code.mov(code.eax, code.dword[code.r10]);
 	code.L(done);
@@ -428,7 +454,7 @@ private:
 		std::vector<Operand> args;
 		uint32_t             slot = 0, state = 0;
 		Xbyak::Label         label;
-		bool                 pending = true, referenced = false, masked = false;
+		bool                 pending = true, referenced = false, masked = false, hard = false;
 	};
 
 	static constexpr auto Near = Xbyak::CodeGenerator::T_NEAR;
@@ -450,6 +476,8 @@ private:
 	}
 
 	void AddOutput(Value value, uint32_t gate);
+	void MarkHard(const Operand& operand);
+	[[nodiscard]] bool IsLoad(const Operand& operand) const;
 	void Consume(std::vector<std::vector<uint32_t>>& gates);
 	Ref Evaluate(Value value, uint32_t context);
 	Operand Analyze(uint32_t index);
@@ -714,6 +742,22 @@ WalkerCompiler::Operand WalkerCompiler::AnalyzeRead(Node& node, const auto& arg,
 	return self;
 }
 
+// A value a descriptor or an output is computed from has to be the true one.
+void WalkerCompiler::MarkHard(const Operand& operand) {
+	if (operand.kind != Kind::Node || m_nodes[operand.value].hard) return;
+	auto& node = m_nodes[operand.value];
+	node.hard  = true;
+	if (node.result != operand) MarkHard(node.result);
+	for (const auto& arg: node.args) MarkHard(arg);
+}
+
+bool WalkerCompiler::IsLoad(const Operand& operand) const {
+	if (operand.kind != Kind::Node) return false;
+	const auto op = m_nodes[operand.value].inst->GetOpcode();
+	return op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer ||
+	       op == ValueOpcode::LoadBufferU32;
+}
+
 void WalkerCompiler::Layout() {
 	uint32_t offset = OutputOffset(m_plan) + static_cast<uint32_t>(m_outputs.size()) * 8u;
 	m_shader_base = offset;
@@ -965,7 +1009,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.mov(c.rcx, c.rax);
 			c.shr(c.rcx, 48);
 			c.jnz(m_ret, Near);
-			LoadGuest(c, c.rax);
+			LoadGuest(c, c.rax, !node.hard, m_ret, node.state, node.slot);
 		} else {
 			Load(c.r11, args[1]);
 			c.shr(c.r11d, 16);
@@ -995,7 +1039,8 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.lea(c.r11, c.ptr[c.r9 + static_cast<size_t>(immediate) + 4u]);
 			c.cmp(c.r11, c.rcx);
 			c.ja(zero, Near);
-			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate));
+			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate), !node.hard, m_ret, node.state,
+			          node.slot);
 		}
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
@@ -1248,6 +1293,18 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 		}
 	}
 	for (const auto value: m_outputs) outputs.push_back(Evaluate(value, 0).operand);
+	for (const auto& words: descriptors) {
+		for (const auto& word: words) MarkHard(word);
+	}
+	for (const auto& output: outputs) MarkHard(output);
+	// A flat word can arrive late, by a GPU copy, so only what locates it has to be true.
+	for (const auto& read: reads) {
+		if (IsLoad(read)) {
+			for (const auto& arg: m_nodes[read.value].args) MarkHard(arg);
+		} else {
+			MarkHard(read);
+		}
+	}
 	Layout();
 
 	Xbyak::Label pass, fail, reset;
@@ -1314,8 +1371,30 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 				c.jmp(fail, Near);
 				return;
 			}
-			Fetch(reads[slot], fail);
+			if (!IsLoad(reads[slot])) {
+				Fetch(reads[slot], fail);
+				c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], c.eax);
+				return;
+			}
+			const auto&  load = m_nodes[reads[slot].value];
+			Xbyak::Label unknown, stored;
+			Fetch(reads[slot], unknown);
 			c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], c.eax);
+			c.jmp(stored, Near);
+			c.L(unknown);
+			c.cmp(c.byte[c.rdx + load.state], LateWordState);
+			c.jne(fail, Near);
+			c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], 0);
+			for (const auto& reg: {c.rdi, c.rsi, c.rdx, c.r8, c.rbp}) c.push(reg);
+			c.mov(c.rbp, c.rsp);
+			c.and_(c.rsp, -16);
+			c.mov(c.rsi, c.qword[c.rdx + load.slot]);
+			c.mov(c.edi, offset);
+			c.mov(c.rax, reinterpret_cast<uint64_t>(&NoteLateWord));
+			c.call(c.rax);
+			c.mov(c.rsp, c.rbp);
+			for (const auto& reg: {c.rbp, c.r8, c.rdx, c.rsi, c.rdi}) c.pop(reg);
+			c.L(stored);
 		};
 		if (blocks.empty()) {
 			for (uint32_t slot = 0; slot < reads.size(); ++slot) flat(slot);
@@ -1403,14 +1482,19 @@ void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
 }
 
 bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<uint32_t>& flat,
-             std::vector<std::pair<uint64_t, uint64_t>>* reads) {
+             std::vector<std::pair<uint64_t, uint64_t>>* reads,
+             std::vector<std::pair<uint32_t, uint64_t>>* late_words) {
 	if (plan.srt_code == nullptr || runtime.user_data.size() < plan.srt_user_data) return false;
 	flat.assign(plan.srt_reads.size(), 0u);
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
-	t_running_walker = plan.srt_code.get();
+	t_running_walker    = plan.srt_code.get();
+	t_late_words        = late_words;
+	t_skipped_late_word = false;
+	if (late_words != nullptr) late_words->clear();
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
 	                                                     plan.srt_scratch.data(), runtime.shader_base);
 	t_running_walker = nullptr;
+	t_late_words     = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
 		for (auto* read = plan.srt_scratch.data() + plan.srt_captures / 8u; read != end; ++read)
@@ -1460,6 +1544,10 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValue
 
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {
 	return RuntimeValidator(program, RuntimeValueType::Any, true).Run(value);
+}
+
+bool SrtWalkerSkippedLateWord() {
+	return t_skipped_late_word;
 }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {

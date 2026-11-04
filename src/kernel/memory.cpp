@@ -910,6 +910,11 @@ uint8_t* ReadTrapTable() {
 	return table;
 }
 
+bool IsGpuWritePending(uint64_t vaddr) noexcept {
+	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread() &&
+	       g_gpu_resources->GetBufferCache().IsWritePending(vaddr, sizeof(uint32_t));
+}
+
 bool TryReadGpuCleanWord(uint64_t vaddr, uint32_t& value) noexcept {
 	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread() &&
 	       !g_gpu_resources->GetBufferCache().HasGpuDirtyBytes(vaddr, sizeof(value)) &&

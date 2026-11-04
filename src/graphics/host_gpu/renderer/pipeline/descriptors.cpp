@@ -848,6 +848,10 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	const auto& snapshot = *prepared.runtime->resources;
 	const auto& layout   = program.bindings;
 
+	// Obtaining a buffer can merge cache buffers, so these come before anything is bound.
+	for (const auto& [index, address]: snapshot.late_words) {
+		(void)m_context.GetBufferCache().ObtainBuffer(address, sizeof(uint32_t), false);
+	}
 	prepared.buffers.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
 	          prepared.shader_data.end(), 0);
@@ -869,6 +873,30 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
 		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
+		if (!snapshot.late_words.empty()) {
+			auto& command = m_context.GetCommandScheduler().Current();
+			command.EndRendering();
+			const auto native = command.Handle();
+			const vk::MemoryBarrier before {.srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+			                                .dstAccessMask = vk::AccessFlagBits::eTransferRead};
+			native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+			                       vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
+			                       nullptr);
+			for (const auto& [index, address]: snapshot.late_words) {
+				const auto [source, offset] =
+				    m_context.GetBufferCache().ObtainBuffer(address, sizeof(uint32_t), false);
+				const vk::BufferCopy copy {offset,
+				                           prepared.flattened_srt.offset + index * sizeof(uint32_t),
+				                           sizeof(uint32_t)};
+				native.copyBuffer(source->Handle(), prepared.flattened_srt.buffer, 1, &copy);
+			}
+			const vk::MemoryBarrier after {.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+			                               .dstAccessMask = vk::AccessFlagBits::eShaderRead};
+			native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr, 0,
+			                       nullptr);
+			BenchStats::NoteLateWords(static_cast<uint32_t>(snapshot.late_words.size()));
+		}
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] != 0) {
 		prepared.shader_data_buffer = NativeUpload(m_context, prepared.shader_data);

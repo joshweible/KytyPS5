@@ -36,6 +36,9 @@ struct ResourceSnapshot {
 	std::vector<DescriptorValue> samplers;
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint32_t>        user_data;
+	// Flat SRT words the GPU had yet to finish writing, by flat index and guest address. A GPU copy
+	// fills them in just before the draw or dispatch.
+	std::vector<std::pair<uint32_t, uint64_t>> late_words;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
 };

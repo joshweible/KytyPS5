@@ -142,6 +142,8 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // On the GPU thread: reads a word the GPU has not written, even from a page it has written to.
 [[nodiscard]] bool TryReadGpuCleanWord(uint64_t vaddr, uint32_t& value) noexcept;
+// On the GPU thread: reading this word would have to wait for the GPU.
+[[nodiscard]] bool IsGpuWritePending(uint64_t vaddr) noexcept;
 // One byte per 4 KiB of the 40-bit guest address space, nonzero where the page traps reads. Code
 // that would otherwise take the fault can look here first; a stale zero only means it faults.
 inline constexpr uint64_t ReadTrapShift = 12;

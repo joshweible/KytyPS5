@@ -72,8 +72,11 @@ bool ValidateWaveUniformValue(const ResourcePlan& program, Value value);
 void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values = {});
 // Runs the walker. flat receives the scalar reads of reachable blocks and reads, when non-null,
 // one DWORD range per guest load. False when a reachable read is unknown.
+// With late_words, a word the GPU is still writing does not wait for the GPU: it stays unknown,
+// and if a flat read wants it, it is listed for a GPU copy.
 bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<uint32_t>& flat,
-             std::vector<std::pair<uint64_t, uint64_t>>* reads);
+             std::vector<std::pair<uint64_t, uint64_t>>* reads,
+             std::vector<std::pair<uint32_t, uint64_t>>* late_words = nullptr);
 // Results of the last walk; false when unknown.
 bool WalkedValue(const ResourcePlan& plan, Value value, uint32_t& result);
 bool WalkedDescriptor(const ResourcePlan& plan, uint32_t source, DescriptorValue& result);
@@ -82,6 +85,8 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image);
 // Length of the guest load at rip if it belongs to the walker running on this thread, else 0.
 // The exception handler completes such a load as a zero read.
 uint32_t SrtWalkerLoadLength(uint64_t rip);
+// Whether the last walk on this thread left a word unknown for that reason.
+bool SrtWalkerSkippedLateWord();
 
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.
