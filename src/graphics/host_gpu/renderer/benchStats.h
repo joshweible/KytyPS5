@@ -18,6 +18,9 @@ enum GpuThreadTime : uint32_t { GpuIdle, GpuDraw, GpuDispatch, GpuOther, GpuThre
 void AddGpuThreadTime(GpuThreadTime kind, uint64_t ns);
 enum WriteKind : uint32_t { WriteBinding, WriteFill, WriteCopy, WriteImage, WriteKinds };
 void NoteWriteKind(WriteKind kind); // The kind of write behind a read that had to wait.
+// KYTY_SAMPLE_GPU=<start seconds> KYTY_SAMPLE_OUT=<path>: samples this thread's stack at 1 kHz
+// for ten seconds, for tools/sample_report.py.
+void SampleThisThread();
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

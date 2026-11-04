@@ -374,6 +374,7 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
+	BenchStats::SampleThisThread();
 	g_gpu_state = gpu;
 
 	for (;;) {
