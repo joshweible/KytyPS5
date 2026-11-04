@@ -100,7 +100,20 @@ public:
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
-	[[nodiscard]] vk::CommandBuffer Handle() const noexcept { return m_buffer; }
+	// Anything that records through this has finished every dispatch's writes behind it, and
+	// ends the run of dispatches that can overlap.
+	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
+		m_dispatch_run = false;
+		if (m_dispatch_barrier_due) {
+			FinishDispatches();
+		}
+		return m_buffer;
+	}
+	// For recording a dispatch inside a run: the caller orders it against the others itself.
+	[[nodiscard]] vk::CommandBuffer DispatchHandle() const noexcept { return m_buffer; }
+	[[nodiscard]] bool InDispatchRun() const noexcept { return m_dispatch_run; }
+	void               StartDispatchRun() const noexcept { m_dispatch_run = true; }
+	void               DeferDispatchBarrier() const noexcept { m_dispatch_barrier_due = true; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -120,7 +133,11 @@ private:
 
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
+	void FinishDispatches() const noexcept;
+
 	vk::CommandBuffer   m_buffer = nullptr;
+	mutable bool        m_dispatch_run         = false;
+	mutable bool        m_dispatch_barrier_due = false;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	HW::Context*        m_registers   = nullptr;
@@ -198,6 +215,26 @@ private:
 	RenderContext&                        m_context;
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;
+	// What the dispatches since the last barrier touch.
+	struct DispatchAccess {
+		uint64_t address = 0;
+		uint64_t size    = 0;
+		bool     write   = false;
+	};
+	struct DispatchImage {
+		ImageId id;
+		bool    write = false;
+	};
+	struct DispatchAccesses {
+		std::vector<DispatchAccess> buffers;
+		std::vector<DispatchImage>  images;
+		bool any_write = false, image_write = false, heap = false;
+		bool raw_read = false, raw_write = false; // Through addresses no binding shows.
+	};
+	DispatchAccesses m_dispatch_accesses;
+	DispatchAccesses m_dispatch_new;
+	void OrderDispatch(CommandBuffer& buffer, const ShaderComputeInputInfo& input,
+	                   const PreparedBindings& bindings);
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;

@@ -92,6 +92,15 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 	return has_writes;
 }
 
+void ComputeToComputeBarrier(vk::CommandBuffer vk_buffer) {
+	const vk::MemoryBarrier barrier {
+	    .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+	                          vk::PipelineStageFlagBits::eComputeShader, vk::DependencyFlags {}, 1,
+	                          &barrier, 0, nullptr, 0, nullptr);
+}
+
 void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages) {
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,

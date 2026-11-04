@@ -922,7 +922,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
-	auto                           vk_buffer              = buffer.Handle();
+	auto                           vk_buffer              =
+	    pipeline_bind_point == vk::PipelineBindPoint::eCompute ? buffer.DispatchHandle()
+	                                                           : buffer.Handle();
 	size_t                         image_descriptor_count = 0;
 	ShaderRecompiler::IR::PushData push_data;
 	bool                           has_push_data = false;

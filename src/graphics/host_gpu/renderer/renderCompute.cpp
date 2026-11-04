@@ -276,6 +276,103 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
+// Dispatches in a run overlap on the GPU unless a barrier separates them. A run starts with the
+// barrier every dispatch used to have, and Handle() ends it, so anything but a dispatch is ordered
+// as before. Inside a run a barrier is only needed where one touches what another wrote, or wrote
+// what another touches.
+void RenderExecutor::OrderDispatch(CommandBuffer& buffer, const ShaderComputeInputInfo& input,
+                                   const PreparedBindings& bindings) {
+	constexpr size_t MaxTracked = 256;
+	const auto&      program    = input.stage.module->info;
+	const auto&      info       = program.info;
+	auto&            now        = m_dispatch_new;
+	now.buffers.clear();
+	now.images.clear();
+	now.heap        = info.uses_image_heap;
+	now.raw_write   = program.has_address_writes || bindings.shared_memory.buffer != nullptr ||
+	                  bindings.gds.buffer != nullptr;
+	now.raw_read    = info.uses_dma;
+	now.any_write   = now.raw_write;
+	now.image_write = false;
+	for (const auto& resource: info.buffers) {
+		if (resource.descriptor_index == UINT32_MAX) continue;
+		const auto& source = bindings.buffer_sources[resource.descriptor_index];
+		if (source.size == 0) continue;
+		now.buffers.push_back({source.address, source.size, resource.written});
+		now.any_write |= resource.written;
+	}
+	for (size_t i = 0; i < info.images.size() && i < bindings.images.size(); i++) {
+		if (!bindings.images[i].image_id) continue;
+		const bool write = info.images[i].written &&
+		                   info.images[i].resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
+		now.images.push_back({bindings.images[i].image_id, write});
+		now.any_write |= write;
+		now.image_write |= write;
+	}
+	auto&      seen       = m_dispatch_accesses;
+	const auto vk_buffer  = buffer.DispatchHandle();
+	const bool in_run     = buffer.InDispatchRun();
+	bool       conflict   = seen.raw_write || (now.raw_read && seen.any_write) ||
+	                  (now.raw_write && (seen.any_write || seen.raw_read || !seen.buffers.empty() ||
+	                                     !seen.images.empty())) ||
+	                  (seen.raw_read && now.any_write) || (now.heap && seen.image_write) ||
+	                  (seen.heap && now.image_write) ||
+	                  seen.buffers.size() + now.buffers.size() > MaxTracked ||
+	                  seen.images.size() + now.images.size() > MaxTracked;
+	for (const auto& a: now.buffers) {
+		if (conflict) break;
+		for (const auto& b: seen.buffers) {
+			if ((a.write || b.write) && a.address < b.address + b.size &&
+			    b.address < a.address + a.size) {
+				conflict = true;
+				break;
+			}
+		}
+	}
+	for (const auto& a: now.images) {
+		if (conflict) break;
+		for (const auto& b: seen.images) {
+			if ((a.write || b.write) && a.id == b.id) {
+				conflict = true;
+				break;
+			}
+		}
+	}
+	if (!in_run) {
+		BenchStats::NoteDispatchBarrier(false);
+		// What came before may still touch anything this dispatch writes.
+		(void)buffer.Handle();
+		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		buffer.StartDispatchRun();
+		seen = {};
+	} else if (conflict) {
+		BenchStats::NoteDispatchBarrier(true);
+		if (BenchStats::Enabled()) {
+			const auto top = program.shader_hash;
+			uint32_t   why = 6;
+			if (seen.raw_write) why = 0;
+			else if (now.raw_write) why = 1;
+			else if (now.raw_read && seen.any_write) why = 2;
+			else if (seen.raw_read && now.any_write) why = 3;
+			else if ((now.heap && seen.image_write) || (seen.heap && now.image_write)) why = 4;
+			else if (seen.buffers.size() + now.buffers.size() > MaxTracked ||
+			         seen.images.size() + now.images.size() > MaxTracked) why = 5;
+			BenchStats::NoteDispatchWhy(why, top);
+		}
+		ComputeToComputeBarrier(vk_buffer);
+		seen = {};
+	} else {
+		BenchStats::NoteDispatchOverlap();
+	}
+	seen.buffers.insert(seen.buffers.end(), now.buffers.begin(), now.buffers.end());
+	seen.images.insert(seen.images.end(), now.images.begin(), now.images.end());
+	seen.any_write |= now.any_write;
+	seen.image_write |= now.image_write;
+	seen.heap |= now.heap;
+	seen.raw_read |= now.raw_read;
+	seen.raw_write |= now.raw_write;
+}
+
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute) {
@@ -386,14 +483,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
 
-	const auto vk_buffer = buffer.Handle();
+	const auto vk_buffer = buffer.DispatchHandle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	if (HasStorageWrites(input_info, bindings)) {
-		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
-		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	}
+	OrderDispatch(buffer, input_info, bindings);
 	if (Config::GraphicsDebugDumpEnabled()) {
 		const auto sampled_images = std::count_if(
 		    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
@@ -497,8 +590,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const auto hash_for_timing = input_info.stage.module->info.shader_hash;
 	const auto wave_for_timing = input_info.stage.module->info.wave_size;
 
-	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	buffer.DeferDispatchBarrier();
 	ResetBindings();
 	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, thread_group_x, thread_group_y,
 	             thread_group_z, wave_for_timing);

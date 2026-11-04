@@ -13,6 +13,8 @@ vk::PipelineStageFlags  ShaderPipelineStages(vk::ShaderStageFlags stages);
 vk::MemoryBarrier       MakeShaderWriteDependency();
 vk::BufferMemoryBarrier MakeGdsDependency(vk::Buffer buffer);
 bool HasShaderBufferWrites(const ShaderStageRuntime& runtime);
+// Orders one dispatch after another: nothing but compute shaders has to see the writes yet.
+void ComputeToComputeBarrier(vk::CommandBuffer vk_buffer);
 void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages);
 void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
                               vk::PipelineStageFlags destination_stages);

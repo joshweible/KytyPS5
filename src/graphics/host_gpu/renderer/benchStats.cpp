@@ -52,6 +52,10 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
+std::atomic<uint64_t> g_dispatch_runs {0};
+std::atomic<uint64_t> g_dispatch_conflicts {0};
+std::atomic<uint64_t> g_dispatch_overlaps {0};
+std::atomic<uint64_t> g_dispatch_why[7];
 
 void ReportReads(double frames) {
 	struct Row {
@@ -95,6 +99,13 @@ void ReportReads(double frames) {
 	            per(g_write_kinds[WriteBinding].exchange(0)), per(g_write_kinds[WriteFill].exchange(0)),
 	            per(g_write_kinds[WriteCopy].exchange(0)), per(g_write_kinds[WriteImage].exchange(0)));
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
+	std::printf("dispatch-why: seen-raw-write=%.0f raw-write=%.0f raw-read=%.0f seen-raw-read=%.0f heap=%.0f full=%.0f overlap=%.0f /frame\n",
+	            per(g_dispatch_why[0].exchange(0)), per(g_dispatch_why[1].exchange(0)), per(g_dispatch_why[2].exchange(0)),
+	            per(g_dispatch_why[3].exchange(0)), per(g_dispatch_why[4].exchange(0)), per(g_dispatch_why[5].exchange(0)),
+	            per(g_dispatch_why[6].exchange(0)));
+	std::printf("dispatch-order: runs=%.1f conflicts=%.1f overlaps=%.1f /frame\n",
+	            per(g_dispatch_runs.exchange(0)), per(g_dispatch_conflicts.exchange(0)),
+	            per(g_dispatch_overlaps.exchange(0)));
 	std::printf("read-writer: finished=%.1f pending=%.1f /frame\n",
 	            per(g_writer_finished.exchange(0)), per(g_writer_pending.exchange(0)));
 	std::printf("bench-anchor: 0x%llx\n", reinterpret_cast<unsigned long long>(&ReportReads));
@@ -261,6 +272,18 @@ void NoteFault(uint64_t address, bool write, bool gpu_thread, uint64_t buffer_ns
 
 void AddGpuThreadTime(GpuThreadTime kind, uint64_t ns) {
 	g_thread_ns[kind].fetch_add(ns, std::memory_order_relaxed);
+}
+
+void NoteDispatchBarrier(bool conflict) {
+	(conflict ? g_dispatch_conflicts : g_dispatch_runs).fetch_add(1u, std::memory_order_relaxed);
+}
+
+void NoteDispatchWhy(uint32_t why, uint64_t) {
+	g_dispatch_why[why].fetch_add(1u, std::memory_order_relaxed);
+}
+
+void NoteDispatchOverlap() {
+	g_dispatch_overlaps.fetch_add(1u, std::memory_order_relaxed);
 }
 
 void NoteCleanRead() {
