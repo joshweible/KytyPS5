@@ -15,7 +15,7 @@ param(
 	[int]$Windows = 4,
 	[int]$WindowSeconds = 15,
 	[int]$TimeoutSeconds = 420,
-	[string]$StoreKey = '2',
+	[string]$StoreKey = '3',
 	[string]$Build = '',
 	[string]$Game = 'D:\dev\ps5\dumps\PPSA26344',
 	[string]$Output = 'D:\dev\ps5\runs\bench-upstream'

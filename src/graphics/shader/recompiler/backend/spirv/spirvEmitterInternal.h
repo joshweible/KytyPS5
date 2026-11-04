@@ -416,10 +416,10 @@ struct MemoryResourceAccess {
 	spv::MemoryAccessMask memory_access    = spv::MemoryAccessMaskNone;
 };
 
-uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
+uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_slot,
                                    uint32_t search_iterations, uint32_t default_resource);
 // Slot word of an image heap byte offset; offsets past the heap select the null element.
-uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_offset);
+uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_slot);
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem,
                                                  uint32_t array_index = 0u);
 

@@ -1618,6 +1618,12 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
+	// One word per resource, then the mapping tables. A table's offset depends on the tables before
+	// it, so it can change every draw: compiled into a shader, each offset would be another shader.
+	// Shaders read it from the resource's word instead.
+	const auto mapping_slots = static_cast<uint32_t>(snapshot.flattened_srt.size());
+	snapshot.flattened_srt.resize(mapping_slots + program.info.buffers.size() +
+	                              program.info.images.size() + program.info.samplers.size());
 	SrtReadCapture capture {runtime, reads};
 	auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	std::array<uint32_t, 3> workgroup_counts {};
@@ -1803,7 +1809,23 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return BuildResourceSpecialization(program, snapshot, specialization);
+	if (!BuildResourceSpecialization(program, snapshot, specialization)) return false;
+	auto slot = mapping_slots;
+	const auto store_slots = [&](auto& resources, size_t roots) {
+		for (uint32_t root = 0; root < roots; ++root) {
+			if (resources[root].indirect_root == root)
+				snapshot.flattened_srt[slot + root] = resources[root].indirect_mapping_offset;
+		}
+		for (auto& resource: resources) {
+			if (resource.indirect_root < roots)
+				resource.indirect_mapping_offset = slot + resource.indirect_root;
+		}
+		slot += static_cast<uint32_t>(roots);
+	};
+	store_slots(specialization.buffers, program.info.buffers.size());
+	store_slots(specialization.images, program.info.images.size());
+	store_slots(specialization.samplers, program.info.samplers.size());
+	return true;
 }
 
 uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {
