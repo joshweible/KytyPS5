@@ -905,6 +905,11 @@ bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noex
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }
 
+uint8_t* ReadTrapTable() {
+	static auto* const table = static_cast<uint8_t*>(std::calloc(ReadTrapPages, 1));
+	return table;
+}
+
 bool TryReadGpuCleanWord(uint64_t vaddr, uint32_t& value) noexcept {
 	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread() &&
 	       !g_gpu_resources->GetBufferCache().HasGpuDirtyBytes(vaddr, sizeof(value)) &&

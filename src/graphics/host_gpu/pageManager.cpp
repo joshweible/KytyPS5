@@ -195,6 +195,12 @@ struct PageManager::Impl {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
 		}
+		using namespace Libs::LibKernel::Memory;
+		const auto first = vaddr >> ReadTrapShift;
+		if (first + (size >> ReadTrapShift) <= ReadTrapPages) {
+			std::memset(ReadTrapTable() + first, mode == Common::VirtualMemory::Mode::NoAccess ? 1 : 0,
+			            size >> ReadTrapShift);
+		}
 	}
 
 	template <bool track, bool is_read, bool masked>

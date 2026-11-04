@@ -3,6 +3,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "kernel/memory.h"
 
 #include <xbyak/xbyak.h>
 
@@ -169,9 +170,40 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
 
 // Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
+// Bit 32 is set when the word was read for the walker. Taking the page fault instead costs
+// microseconds, and SRT tables often share pages with GPU output.
+uint64_t KYTY_SYSV_ABI ReadTrappedWord(uint64_t address) {
+	uint32_t word = 0;
+	return LibKernel::Memory::TryReadGpuCleanWord(address, word) ? (uint64_t {1} << 32u) | word : 0u;
+}
+
 void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
+	namespace Memory = LibKernel::Memory;
+	Xbyak::Label load, done;
 	code.lea(code.r10, code.ptr[address]);
+	code.mov(code.rcx, code.r10);
+	code.shr(code.rcx, static_cast<int>(Memory::ReadTrapShift));
+	code.mov(code.r11, Memory::ReadTrapPages);
+	code.cmp(code.rcx, code.r11);
+	code.jae(load, Xbyak::CodeGenerator::T_NEAR);
+	code.mov(code.r11, reinterpret_cast<uint64_t>(Memory::ReadTrapTable()));
+	code.cmp(code.byte[code.r11 + code.rcx], 0);
+	code.je(load, Xbyak::CodeGenerator::T_NEAR);
+	for (const auto& reg: {code.rdi, code.rsi, code.rdx, code.r8, code.r10, code.rbp}) code.push(reg);
+	code.mov(code.rbp, code.rsp);
+	code.and_(code.rsp, -16);
+	code.mov(code.rdi, code.r10);
+	code.mov(code.rax, reinterpret_cast<uint64_t>(&ReadTrappedWord));
+	code.call(code.rax);
+	code.mov(code.rsp, code.rbp);
+	for (const auto& reg: {code.rbp, code.r10, code.r8, code.rdx, code.rsi, code.rdi}) code.pop(reg);
+	code.mov(code.rcx, code.rax);
+	code.shr(code.rcx, 32);
+	code.jnz(done, Xbyak::CodeGenerator::T_NEAR);
+	code.L(load);
 	code.mov(code.eax, code.dword[code.r10]);
+	code.L(done);
+	code.mov(code.eax, code.eax);
 }
 
 class RuntimeValidator {

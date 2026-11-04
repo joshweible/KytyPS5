@@ -142,6 +142,11 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // On the GPU thread: reads a word the GPU has not written, even from a page it has written to.
 [[nodiscard]] bool TryReadGpuCleanWord(uint64_t vaddr, uint32_t& value) noexcept;
+// One byte per 4 KiB of the 40-bit guest address space, nonzero where the page traps reads. Code
+// that would otherwise take the fault can look here first; a stale zero only means it faults.
+inline constexpr uint64_t ReadTrapShift = 12;
+inline constexpr uint64_t ReadTrapPages = uint64_t {1} << (40u - ReadTrapShift);
+[[nodiscard]] uint8_t*    ReadTrapTable();
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);
