@@ -52,6 +52,7 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
+std::atomic<uint64_t> g_gpu_events[GpuEvents];
 std::atomic<uint64_t> g_stage_ns[RecordStages * 2];
 thread_local uint32_t t_stage_bank = 0;
 thread_local std::chrono::steady_clock::time_point t_stage_from;
@@ -138,6 +139,10 @@ void ReportReads(double frames) {
 		            static_cast<double>(g_stage_ns[i].exchange(0)) * 1e-6 / frames,
 		            static_cast<double>(g_stage_ns[i + RecordStages].exchange(0)) * 1e-6 / frames);
 	}
+	std::printf("gpu-events: passes=%.0f image-barriers=%.0f image-uploads=%.0f buffer-uploads=%.0f draw-write-barriers=%.0f buffer-copies=%.0f /frame\n",
+	            per(g_gpu_events[EventRenderPass].exchange(0)), per(g_gpu_events[EventImageBarrier].exchange(0)),
+	            per(g_gpu_events[EventImageUpload].exchange(0)), per(g_gpu_events[EventBufferUpload].exchange(0)),
+	            per(g_gpu_events[EventDrawWriteBarrier].exchange(0)), per(g_gpu_events[EventCopyBuffer].exchange(0)));
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
 	std::printf("late-words: %.1f /frame\n", per(g_late_words.exchange(0)));
 	std::printf("dispatch-why: seen-raw-write=%.0f raw-write=%.0f raw-read=%.0f seen-raw-read=%.0f heap=%.0f full=%.0f overlap=%.0f /frame\n",
@@ -374,6 +379,10 @@ void MarkStage(RecordStage stage) {
 		    std::memory_order_relaxed);
 	}
 	t_stage_from = now;
+}
+
+void NoteGpuEvent(GpuEvent event) {
+	g_gpu_events[event].fetch_add(1u, std::memory_order_relaxed);
 }
 
 void NoteCleanRead() {

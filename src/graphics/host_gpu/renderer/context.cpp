@@ -3,6 +3,7 @@
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
@@ -86,6 +87,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
+	BenchStats::NoteGpuEvent(BenchStats::EventRenderPass);
 	m_render_state = state;
 	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state.depth_stencil_attachment.depth_clear   = false;

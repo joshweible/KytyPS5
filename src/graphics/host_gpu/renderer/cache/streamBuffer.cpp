@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
 #include <cstring>
@@ -199,6 +200,7 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 2, before, 0, nullptr);
 	const vk::BufferCopy copy {source_offset, destination_offset, size};
+	BenchStats::NoteGpuEvent(BenchStats::EventCopyBuffer);
 	native.copyBuffer(source.Handle(), Handle(), 1, &copy);
 	const vk::BufferMemoryBarrier after[] = {
 	    source.Barrier(source_offset, size, vk::AccessFlagBits::eTransferRead, MEMORY_ACCESS),

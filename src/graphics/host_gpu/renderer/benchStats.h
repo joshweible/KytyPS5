@@ -54,6 +54,16 @@ enum RecordStage : uint32_t {
 };
 void MarkStage(RecordStage stage);
 void SetStageBank(uint32_t bank);
+enum GpuEvent : uint32_t {
+	EventRenderPass,
+	EventImageBarrier,
+	EventImageUpload,
+	EventBufferUpload,
+	EventDrawWriteBarrier,
+	EventCopyBuffer,
+	GpuEvents
+};
+void NoteGpuEvent(GpuEvent event);
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

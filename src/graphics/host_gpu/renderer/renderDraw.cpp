@@ -1214,6 +1214,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	if (shader_write_stages) {
 		// As for dispatches, buffer writes wait for earlier accesses to the memory.
+		BenchStats::NoteGpuEvent(BenchStats::EventDrawWriteBarrier);
 		buffer.EndRendering();
 		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
 	}

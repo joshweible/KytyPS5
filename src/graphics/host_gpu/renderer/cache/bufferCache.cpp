@@ -647,6 +647,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::PipelineStageFlagBits::eTransfer,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+		BenchStats::NoteGpuEvent(BenchStats::EventBufferUpload);
 		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
 		                  copies.data());
 		auto after          = before;

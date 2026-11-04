@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 
 #include "common/assert.h"
@@ -242,6 +243,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 		return;
 	}
 	m_scheduler.EndRendering();
+	BenchStats::NoteGpuEvent(BenchStats::EventImageBarrier);
 	vk::DependencyInfo dependency {};
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
@@ -251,6 +253,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
                    uint64_t size) {
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
+	BenchStats::NoteGpuEvent(BenchStats::EventImageUpload);
 	m_scheduler.EndRendering();
 	vk::BufferMemoryBarrier2 buffer_barrier {};
 	buffer_barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
