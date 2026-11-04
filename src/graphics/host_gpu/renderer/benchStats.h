@@ -25,6 +25,7 @@ void NoteCleanRead(); // A walker load served without the GPU from a page it wro
 void NoteDispatchBarrier(bool conflict); // Run started, or a conflict inside one.
 void NoteDispatchOverlap();
 void NoteDispatchWhy(uint32_t why, uint64_t hash);
+void NoteImageLookup(bool known);
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

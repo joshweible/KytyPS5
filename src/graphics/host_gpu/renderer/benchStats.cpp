@@ -52,6 +52,8 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
+std::atomic<uint64_t> g_image_known {0};
+std::atomic<uint64_t> g_image_searched {0};
 std::atomic<uint64_t> g_dispatch_runs {0};
 std::atomic<uint64_t> g_dispatch_conflicts {0};
 std::atomic<uint64_t> g_dispatch_overlaps {0};
@@ -98,6 +100,8 @@ void ReportReads(double frames) {
 	std::printf("read-kind: binding=%.1f fill=%.1f copy=%.1f image=%.1f /frame\n",
 	            per(g_write_kinds[WriteBinding].exchange(0)), per(g_write_kinds[WriteFill].exchange(0)),
 	            per(g_write_kinds[WriteCopy].exchange(0)), per(g_write_kinds[WriteImage].exchange(0)));
+	std::printf("image-lookup: known=%.0f searched=%.0f /frame\n", per(g_image_known.exchange(0)),
+	            per(g_image_searched.exchange(0)));
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
 	std::printf("dispatch-why: seen-raw-write=%.0f raw-write=%.0f raw-read=%.0f seen-raw-read=%.0f heap=%.0f full=%.0f overlap=%.0f /frame\n",
 	            per(g_dispatch_why[0].exchange(0)), per(g_dispatch_why[1].exchange(0)), per(g_dispatch_why[2].exchange(0)),
@@ -284,6 +288,10 @@ void NoteDispatchWhy(uint32_t why, uint64_t) {
 
 void NoteDispatchOverlap() {
 	g_dispatch_overlaps.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void NoteImageLookup(bool known) {
+	(known ? g_image_known : g_image_searched).fetch_add(1u, std::memory_order_relaxed);
 }
 
 void NoteCleanRead() {

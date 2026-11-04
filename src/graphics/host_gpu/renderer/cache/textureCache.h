@@ -14,6 +14,7 @@
 
 #include <bitset>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -93,6 +94,13 @@ private:
 
 	using ImageIds       = InlinePageOwnerList<ImageId, 16>;
 	using ImagePageTable = MultiLevelPageTable<ImageIds, 20, 44, 14>;
+	// An image search that found one image, which stays right until an image comes or goes.
+	struct KnownImage {
+		ImageId  id;
+		uint64_t generation = 0;
+	};
+	std::unordered_map<uint64_t, KnownImage> m_known_images;
+	uint64_t                                 m_image_generation = 1;
 
 	// Callers pass a nonempty, valid guest range.
 	template <typename Func>

@@ -31,6 +31,9 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <array>
+#include <unordered_map>
+#include <xxhash.h>
 #include <atomic>
 #include <bit>
 #include <fmt/format.h>
@@ -587,7 +590,33 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	if (!resource.r128 && descriptor.MetaCompress() && tile != Prospero::TileMode::kDepth) {
 		desc.info.metadata.kind = ImageMetadataKind::Dcc;
 	}
-	if (levels > physical_levels) {
+	// Working out a texture's layout is the same every time for the same descriptor.
+	struct LayoutKey {
+		std::array<uint32_t, 8> fields;
+		uint32_t                pixel_format, format, levels, view_levels, r128, base_level;
+		bool operator==(const LayoutKey&) const = default;
+	};
+	struct Layout {
+		LayoutKey key;
+		ImageInfo info;
+		uint32_t  view_base;
+	};
+	static std::unordered_map<uint64_t, Layout> layouts;
+	LayoutKey layout_key {};
+	std::copy_n(descriptor.fields, 8, layout_key.fields.begin());
+	layout_key.pixel_format = static_cast<uint32_t>(pixel_format);
+	layout_key.format       = static_cast<uint32_t>(format);
+	layout_key.levels       = levels;
+	layout_key.view_levels  = view_levels;
+	layout_key.r128         = resource.r128 ? 1u : 0u;
+	layout_key.base_level   = static_cast<uint32_t>(base_level);
+	const auto layout_hash  = XXH3_64bits(&layout_key, sizeof(layout_key));
+	const auto known_layout = layouts.find(layout_hash);
+	const bool layout_known = known_layout != layouts.end() && known_layout->second.key == layout_key;
+	if (layout_known) {
+		desc.info = known_layout->second.info;
+		view_base = known_layout->second.view_base;
+	} else if (levels > physical_levels) {
 		if (!ResolveTextureMipView(desc.info, physical_levels,
 		                           !resource.r128 && descriptor.MetaCompress(), view_levels,
 		                           view_base)) {
@@ -619,13 +648,17 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	if (storage) {
 		ValidateStorageTexture(resource, descriptor, desc.info.data.size);
 	}
-	if (!resource.r128 && descriptor.MetaCompress() && tile != Prospero::TileMode::kDepth) {
-		TileSizeAlign metadata_size {};
-		(void)TileGetDccSize(width, height, volume ? depth : image_layers,
-		                     desc.info.bytes_per_block, physical_levels, tile, metadata_size,
-		                     std::countr_zero(samples));
-		desc.info.metadata.range         = {descriptor.MetaAddr() << 8u, metadata_size.size};
-		desc.info.metadata.dcc_alpha_msb = descriptor.DccAlphaPos();
+	if (!layout_known) {
+		if (!resource.r128 && descriptor.MetaCompress() && tile != Prospero::TileMode::kDepth) {
+			TileSizeAlign metadata_size {};
+			(void)TileGetDccSize(width, height, volume ? depth : image_layers,
+			                     desc.info.bytes_per_block, physical_levels, tile, metadata_size,
+			                     std::countr_zero(samples));
+			desc.info.metadata.range         = {descriptor.MetaAddr() << 8u, metadata_size.size};
+			desc.info.metadata.dcc_alpha_msb = descriptor.DccAlphaPos();
+		}
+		if (layouts.size() >= 65536u) layouts.clear();
+		layouts[layout_hash] = {layout_key, desc.info, view_base};
 	}
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,
 	                                 view_levels, desc.info.resources.layers);

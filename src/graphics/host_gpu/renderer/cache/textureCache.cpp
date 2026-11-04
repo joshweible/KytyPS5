@@ -28,6 +28,7 @@
 #include <tuple>
 #include <utility>
 #include <vulkan/vulkan_format_traits.hpp>
+#include <xxhash.h>
 
 namespace Libs::Graphics {
 
@@ -215,6 +216,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		m_image_page_table[page].push_back(id);
 	});
+	m_image_generation++;
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
@@ -232,6 +234,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	});
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
+	m_image_generation++;
 	image.registered = false;
 }
 
@@ -1245,7 +1248,33 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	ImageId result {};
 	{
 		std::scoped_lock lock {m_lock};
-		const auto candidates  = FindImagesInRegion(desc.info.data.address, desc.info.data.size);
+		const auto&      info = desc.info;
+		const std::array<uint64_t, 14> lookup {
+		    info.data.address,
+		    info.data.size,
+		    info.extent.width,
+		    info.extent.height,
+		    info.extent.depth,
+		    static_cast<uint64_t>(info.pixel_format),
+		    static_cast<uint64_t>(info.guest_format),
+		    static_cast<uint64_t>(info.type),
+		    uint64_t {info.resources.levels} << 32u | info.resources.layers,
+		    info.bytes_per_block,
+		    info.samples,
+		    static_cast<uint64_t>(info.tile_mode),
+		    static_cast<uint64_t>(desc.type),
+		    uint64_t {exact_format} << 1u | uint64_t {desc.heap}};
+		const auto lookup_hash = XXH3_64bits(lookup.data(), sizeof(lookup));
+		const auto known       = m_known_images.find(lookup_hash);
+		const bool found_before =
+		    known != m_known_images.end() && known->second.generation == m_image_generation;
+		BenchStats::NoteImageLookup(found_before);
+		if (found_before) {
+			result = known->second.id;
+		}
+		const auto candidates  = found_before
+		                             ? ImageIds {}
+		                             : FindImagesInRegion(desc.info.data.address, desc.info.data.size);
 		bool       block_alias = false;
 
 		for (const auto id: candidates) {
@@ -1308,6 +1337,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 		}
 
+		if (!found_before && candidates.size() == 1u && candidates.front() == result && !block_alias) {
+			m_known_images[lookup_hash] = {result, m_image_generation};
+		}
 		if (result && !m_slot_images[result].depth_id) {
 			auto& resolved = m_slot_images[result];
 			if (exact_format && resolved.info.pixel_format != desc.info.pixel_format) {
