@@ -52,6 +52,8 @@ thread_local uint64_t t_fault_pc = 0;
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
+std::atomic<uint64_t> g_stage_ns[RecordStages];
+thread_local std::chrono::steady_clock::time_point t_stage_from;
 std::atomic<uint64_t> g_late_words {0};
 // By packet length: under 10, 30, 100, 300 and 1000 us, 3 ms, more.
 constexpr int PacketBuckets = 7;
@@ -125,6 +127,14 @@ void ReportReads(double frames) {
 			            static_cast<double>(ns) * 1e-6 / frames,
 			            static_cast<double>(ns) * 1e-3 / static_cast<double>(count));
 		}
+	}
+	const char* const stage_names[RecordStages] = {
+	    "none", "draw-checks", "draw-programs", "draw-targets", "draw-bindings", "draw-images",
+	    "draw-buffers", "draw-pipeline", "draw-acquire", "draw-commit", "draw-record",
+	    "cs-programs", "cs-bindings", "cs-bda", "cs-images", "cs-buffers", "cs-commit", "cs-record"};
+	for (uint32_t i = 1; i < RecordStages; i++) {
+		std::printf("record-stage: %-14s %.2f ms/frame\n", stage_names[i],
+		            static_cast<double>(g_stage_ns[i].exchange(0)) * 1e-6 / frames);
 	}
 	std::printf("read-clean: %.1f /frame\n", per(g_clean_reads.exchange(0)));
 	std::printf("late-words: %.1f /frame\n", per(g_late_words.exchange(0)));
@@ -347,6 +357,17 @@ void NotePacket(uint32_t opcode, uint64_t ns) {
 
 void NoteLateWords(uint32_t count) {
 	g_late_words.fetch_add(count, std::memory_order_relaxed);
+}
+
+void MarkStage(RecordStage stage) {
+	const auto now = std::chrono::steady_clock::now();
+	if (stage != StageNone) {
+		g_stage_ns[stage].fetch_add(
+		    static_cast<uint64_t>(
+		        std::chrono::duration_cast<std::chrono::nanoseconds>(now - t_stage_from).count()),
+		    std::memory_order_relaxed);
+	}
+	t_stage_from = now;
 }
 
 void NoteCleanRead() {

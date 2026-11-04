@@ -30,6 +30,29 @@ void NotePacket(uint32_t opcode, uint64_t ns);
 void NoteShader(uint64_t hash); // The operation the current packet recorded.
 void AddSchedulerWait(uint64_t ns);
 void NoteLateWords(uint32_t count); // Flat words filled in by a GPU copy.
+// Charges the time since the last mark on this thread to a stage of recording.
+enum RecordStage : uint32_t {
+	StageNone,
+	DrawChecks,
+	DrawPrograms,
+	DrawTargets,
+	DrawBindings,
+	DrawImages,
+	DrawBuffers,
+	DrawPipeline,
+	DrawAcquire,
+	DrawCommit,
+	DrawRecord,
+	DispatchPrograms,
+	DispatchBindings,
+	DispatchBda,
+	DispatchImages,
+	DispatchBuffers,
+	DispatchCommit,
+	DispatchRecord,
+	RecordStages
+};
+void MarkStage(RecordStage stage);
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

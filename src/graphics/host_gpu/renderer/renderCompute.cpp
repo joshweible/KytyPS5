@@ -377,6 +377,7 @@ void RenderExecutor::OrderDispatch(CommandBuffer& buffer, const ShaderComputeInp
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute) {
+	BenchStats::MarkStage(BenchStats::StageNone);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -467,6 +468,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	auto& pipeline = *compute_pipeline;
 	auto& bindings = m_compute_bindings;
+	BenchStats::MarkStage(BenchStats::DispatchPrograms);
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
 		std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
@@ -474,20 +476,25 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
+	BenchStats::MarkStage(BenchStats::DispatchBindings);
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}
+	BenchStats::MarkStage(BenchStats::DispatchBda);
 	if (program.info.uses_image_heap) {
 		m_context.GetImageHeap().Rebind(*this);
 	}
 	RebindImages(bindings);
+	BenchStats::MarkStage(BenchStats::DispatchImages);
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
+	BenchStats::MarkStage(BenchStats::DispatchBuffers);
 
 	const auto vk_buffer = buffer.DispatchHandle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	OrderDispatch(buffer, input_info, bindings);
+	BenchStats::MarkStage(BenchStats::DispatchCommit);
 	if (Config::GraphicsDebugDumpEnabled()) {
 		const auto sampled_images = std::count_if(
 		    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
@@ -593,6 +600,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	buffer.DeferDispatchBarrier();
 	ResetBindings();
+	BenchStats::MarkStage(BenchStats::DispatchRecord);
 	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, thread_group_x, thread_group_y,
 	             thread_group_z, wave_for_timing);
 }
