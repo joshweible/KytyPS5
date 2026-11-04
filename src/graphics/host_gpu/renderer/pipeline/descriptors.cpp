@@ -849,8 +849,21 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	const auto& layout   = program.bindings;
 
 	// Obtaining a buffer can merge cache buffers, so these come before anything is bound.
+	struct LateRun {
+		uint64_t index, address, words;
+	};
+	static thread_local std::vector<LateRun> late_runs;
+	late_runs.clear();
 	for (const auto& [index, address]: snapshot.late_words) {
-		(void)m_context.GetBufferCache().ObtainBuffer(address, sizeof(uint32_t), false);
+		if (!late_runs.empty() && late_runs.back().index + late_runs.back().words == index &&
+		    late_runs.back().address + late_runs.back().words * sizeof(uint32_t) == address) {
+			late_runs.back().words++;
+		} else {
+			late_runs.push_back({index, address, 1u});
+		}
+	}
+	for (const auto& run: late_runs) {
+		(void)m_context.GetBufferCache().ObtainBuffer(run.address, run.words * sizeof(uint32_t), false);
 	}
 	prepared.buffers.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
@@ -882,12 +895,12 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 			                       vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
 			                       nullptr);
-			for (const auto& [index, address]: snapshot.late_words) {
+			for (const auto& run: late_runs) {
+				const auto bytes = run.words * sizeof(uint32_t);
 				const auto [source, offset] =
-				    m_context.GetBufferCache().ObtainBuffer(address, sizeof(uint32_t), false);
-				const vk::BufferCopy copy {offset,
-				                           prepared.flattened_srt.offset + index * sizeof(uint32_t),
-				                           sizeof(uint32_t)};
+				    m_context.GetBufferCache().ObtainBuffer(run.address, bytes, false);
+				const vk::BufferCopy copy {
+				    offset, prepared.flattened_srt.offset + run.index * sizeof(uint32_t), bytes};
 				native.copyBuffer(source->Handle(), prepared.flattened_srt.buffer, 1, &copy);
 			}
 			const vk::MemoryBarrier after {.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
@@ -895,7 +908,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 			                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr, 0,
 			                       nullptr);
-			BenchStats::NoteLateWords(static_cast<uint32_t>(snapshot.late_words.size()));
+			BenchStats::NoteLateWords(static_cast<uint32_t>(late_runs.size()));
 		}
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] != 0) {
