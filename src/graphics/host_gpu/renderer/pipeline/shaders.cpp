@@ -1048,6 +1048,23 @@ uint32_t PrefetchLibraryParts(GraphicContext& graphics, const PipelineRenderingS
 // compiles each graphics pipeline using one of them once more, as a monolithic pipeline that
 // captures the driver's statistics (registers, spills) and internal representations (ISA), and
 // writes them to pipeline-stats-<vertex hash>-<pixel hash>-<n>.txt in the working directory.
+// KYTY_SHADER_NO_DRIVER_OPT=<hash>[,<hash>...]: compute shaders built with the driver's optimizer
+// off. nvgpucomp64.dll (NVIDIA 621.01) hits an internal breakpoint on some large, valid modules.
+static bool DriverOptimizationDisabled(uint64_t shader_hash) {
+	static const std::vector<uint64_t> hashes = [] {
+		std::vector<uint64_t> list;
+		const char*           text = KYTY_GETENV("KYTY_SHADER_NO_DRIVER_OPT");
+		while (text != nullptr && *text != '\0') {
+			char* end = nullptr;
+			if (const auto hash = std::strtoull(text, &end, 16); hash != 0) list.push_back(hash);
+			if (end == text) break;
+			text = (*end == ',') ? end + 1 : end;
+		}
+		return list;
+	}();
+	return std::find(hashes.begin(), hashes.end(), shader_hash) != hashes.end();
+}
+
 static const std::vector<uint64_t>& PipelineStatsHashes() {
 	static const std::vector<uint64_t> hashes = [] {
 		std::vector<uint64_t> result;
@@ -1281,6 +1298,9 @@ Common::UniqueFunction<vk::Pipeline> PrepareComputePipeline(GraphicContext&     
 		}
 		info.layout            = layout;
 		info.basePipelineIndex = -1;
+		if (DriverOptimizationDisabled(shader_hash)) {
+			info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+		}
 		vk::Pipeline pipeline  = nullptr;
 		const auto   started   = std::chrono::steady_clock::now();
 		g_shader_progress.active_compiles.fetch_add(1, std::memory_order_relaxed);

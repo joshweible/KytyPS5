@@ -580,9 +580,19 @@ std::map<uint32_t, std::map<uint32_t, Binding>> ReflectSets(const std::vector<ui
 
 bool TimeCompute(const Device& dev, const std::vector<uint32_t>& spirv, uint32_t wave_size,
                  Result& out) {
-	auto&      d     = VULKAN_HPP_DEFAULT_DISPATCHER;
-	const auto words = WithCacheBuster(spirv);
-	auto       sets  = ReflectSets(words);
+	auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+	// KYTY_BENCH_SPV=<file>: time this SPIR-V instead of the translated module, for trying
+	// transformed modules against the driver.
+	std::vector<uint32_t> replacement;
+	if (const char* path = std::getenv("KYTY_BENCH_SPV"); path != nullptr) {
+		std::ifstream file(path, std::ios::binary | std::ios::ate);
+		replacement.resize(static_cast<size_t>(file.tellg()) / 4u);
+		file.seekg(0);
+		file.read(reinterpret_cast<char*>(replacement.data()),
+		          static_cast<std::streamsize>(replacement.size() * 4u));
+	}
+	const auto words   = WithCacheBuster(replacement.empty() ? spirv : replacement);
+	auto       sets    = ReflectSets(words);
 	uint32_t   max_set = 0;
 	for (auto& s: sets) max_set = std::max(max_set, s.first);
 	std::vector<VkDescriptorSetLayout> layouts;
@@ -638,7 +648,8 @@ bool TimeCompute(const Device& dev, const std::vector<uint32_t>& spirv, uint32_t
 	if (dev.subgroup_control && wave_size >= dev.min_subgroup && wave_size <= dev.max_subgroup) {
 		cpi.stage.pNext = &rss;
 	}
-	cpi.layout             = pipeline_layout;
+		cpi.layout             = pipeline_layout;
+		if (std::getenv("KYTY_BENCH_NOOPT") != nullptr) cpi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
 	cpi.basePipelineIndex  = -1;
 	VkPipeline pipeline    = VK_NULL_HANDLE;
 	const auto t0          = std::chrono::steady_clock::now();
@@ -718,6 +729,7 @@ bool PrecompileCompute(const Device& dev, VkPipelineCache cache, const std::vect
 		cpi.stage.pNext = &rss;
 	}
 	cpi.layout             = pipeline_layout;
+	if (std::getenv("KYTY_BENCH_NOOPT") != nullptr) cpi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
 	cpi.basePipelineIndex  = -1;
 	VkPipeline pipeline    = VK_NULL_HANDLE;
 	const auto t0          = std::chrono::steady_clock::now();

@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -12,8 +13,48 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <string>
+#include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
+
+// KYTY_LANE_REPORT=<file>: one line per two-lane module, counting the operations that look across
+// lanes, to measure how many shaders could run with one lane per invocation.
+static void ReportLaneUse(const Emitter::EmitterState& state) {
+	static FILE* file = [] {
+		const char* path = std::getenv("KYTY_LANE_REPORT");
+		return path != nullptr ? std::fopen(path, "ab") : nullptr;
+	}();
+	if (file == nullptr || state.lane_count != 2u) return;
+	std::map<std::string, uint32_t> counts;
+	uint32_t                        total = 0;
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			total++;
+			const auto name = std::string(IR::ValueOpcodeName(inst.GetOpcode()));
+			if (inst.GetOpcode() == IR::ValueOpcode::ConditionRef) {
+				counts["Cond" + std::to_string(static_cast<int>(inst.Flags<CFG::BranchCondition>()))]++;
+			} else if (name.starts_with("Ballot") || name.starts_with("ReadFirstLane") ||
+			           name.starts_with("ReadLane") || name.starts_with("WriteLane") ||
+			           name.starts_with("Subgroup") || name.starts_with("Dpp") ||
+			           name.starts_with("Permute") || name.starts_with("DataAppend") ||
+			           name.starts_with("DataConsume") || name.find("Lane") != std::string::npos ||
+			           name.find("Mbcnt") != std::string::npos) {
+				counts[name]++;
+			}
+		}
+	}
+	static std::mutex report_mutex;
+	const std::scoped_lock lock(report_mutex);
+	std::string line = fmt::format("{:016x} {}", state.program.shader_hash, total);
+	for (const auto& [name, count]: counts) line += fmt::format(" {}={}", name, count);
+	line.push_back(static_cast<char>(10));
+	std::fwrite(line.data(), 1, line.size(), file);
+	std::fflush(file);
+}
 
 namespace {
 
@@ -495,8 +536,9 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
-	        ? 2u
+	        ? (std::getenv("KYTY_BENCH_ONE_LANE") != nullptr ? 1u : 2u)
 	        : 1u;
+	ReportLaneUse(state);
 	DefineModule(state);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
