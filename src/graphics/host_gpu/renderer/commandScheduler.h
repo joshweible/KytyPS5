@@ -23,6 +23,10 @@ public:
 
 	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
 	void           EndRendering() { m_command.EndRendering(); }
+	// KYTY_GPU_PROFILE=<start seconds>: charges the GPU time since the last mark to this operation,
+	// then prints a report once the capture is full. Does nothing otherwise.
+	enum class ProfileKind : uint8_t { Start, Draw, Dispatch };
+	void ProfileMark(ProfileKind kind, uint64_t hash, uint32_t a, uint32_t b, uint32_t wave);
 	void           Flush();
 	void           Flush(SubmitInfo& submit);
 	void           Finish();
@@ -86,6 +90,7 @@ private:
 	void WriteStartTimestamp();
 	void WriteEndTimestamp();
 	void ReadTimestamps(uint32_t slot);
+	void ReportProfile();
 	void PriorityOperationsThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
@@ -109,6 +114,15 @@ private:
 	uint32_t                  m_timestamp_next = 0;
 	uint32_t                  m_timestamp_slot = UINT32_MAX;
 	uint64_t                  m_gpu_last_end   = 0;
+	struct ProfileRecord {
+		uint64_t    hash = 0;
+		uint32_t    a = 0, b = 0, wave = 0;
+		ProfileKind kind = ProfileKind::Start;
+	};
+	static constexpr uint32_t  ProfileMarks = 60000;
+	vk::QueryPool              m_profile_pool = nullptr;
+	std::vector<ProfileRecord> m_profile;
+	bool                       m_profile_done = false;
 };
 
 } // namespace Libs::Graphics

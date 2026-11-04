@@ -6,7 +6,12 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <optional>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -303,7 +308,96 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	if (BenchStats::Enabled()) {
 		WriteStartTimestamp();
 	}
+	ProfileMark(ProfileKind::Start, 0, 0, 0, 0);
 	return m_command;
+}
+
+void CommandScheduler::ProfileMark(ProfileKind kind, uint64_t hash, uint32_t a, uint32_t b,
+                                   uint32_t wave) {
+	static const int start = [] {
+		const char* text = std::getenv("KYTY_GPU_PROFILE");
+		return text != nullptr ? std::atoi(text) : -1;
+	}();
+	if (start < 0 || m_profile_done) {
+		return;
+	}
+	static const auto began = std::chrono::steady_clock::now();
+	if (m_profile_pool == nullptr) {
+		if (kind != ProfileKind::Start ||
+		    std::chrono::steady_clock::now() - began < std::chrono::seconds(start)) {
+			return;
+		}
+		vk::QueryPoolCreateInfo info {};
+		info.queryType  = vk::QueryType::eTimestamp;
+		info.queryCount = ProfileMarks;
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.createQueryPool(&info, nullptr, &m_profile_pool) !=
+		                     vk::Result::eSuccess);
+		m_command.m_buffer.resetQueryPool(m_profile_pool, 0, ProfileMarks);
+		m_profile.reserve(ProfileMarks);
+	}
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_profile_pool,
+	                                  static_cast<uint32_t>(m_profile.size()));
+	m_profile.push_back({hash, a, b, wave, kind});
+	if (m_profile.size() == ProfileMarks) {
+		m_profile_done = true;
+		std::lock_guard lock(m_operation_mutex);
+		m_pending_operations.push({[this] { ReportProfile(); }, CurrentTick()});
+	}
+}
+
+void CommandScheduler::ReportProfile() {
+	std::vector<uint64_t> stamps(m_profile.size());
+	const auto result = m_graphics.device.getQueryPoolResults(
+	    m_profile_pool, 0, static_cast<uint32_t>(stamps.size()), stamps.size() * sizeof(uint64_t),
+	    stamps.data(), sizeof(uint64_t), vk::QueryResultFlagBits::e64);
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	const double period = m_graphics.GetPhysicalDeviceProperties().limits.timestampPeriod * 1e-6;
+	struct Row {
+		double   ms = 0.0;
+		uint64_t count = 0, work = 0;
+		uint32_t a = 0, b = 0, wave = 0;
+		bool     draw = false;
+	};
+	std::map<uint64_t, Row> rows;
+	double   draw_ms = 0.0, dispatch_ms = 0.0;
+	uint64_t draws = 0, dispatches = 0;
+	for (size_t i = 1; i < stamps.size(); i++) {
+		const auto& record = m_profile[i];
+		if (record.kind == ProfileKind::Start) continue;
+		const double ms = static_cast<double>(stamps[i] - stamps[i - 1]) * period;
+		auto&        row = rows[record.hash];
+		row.ms += ms;
+		row.count++;
+		row.wave = record.wave;
+		row.draw = record.kind == ProfileKind::Draw;
+		if (row.draw) {
+			row.a = record.a;
+			row.b = record.b;
+			draw_ms += ms;
+			draws++;
+		} else {
+			row.work += uint64_t {record.a} * record.b;
+			dispatch_ms += ms;
+			dispatches++;
+		}
+	}
+	const double frames = static_cast<double>(draws + dispatches) / 3950.0;
+	std::printf("gpu-prof: frames=%.1f draws %.1f ms/frame, dispatches %.1f ms/frame\n",
+	            frames, draw_ms / frames, dispatch_ms / frames);
+	std::vector<std::pair<double, uint64_t>> order;
+	for (const auto& [hash, row]: rows) order.emplace_back(row.ms, hash);
+	std::sort(order.rbegin(), order.rend());
+	for (size_t i = 0; i < std::min<size_t>(order.size(), 45u); i++) {
+		const auto& row = rows[order[i].second];
+		std::printf("gpu-prof: %s %016llx %.2f ms/frame %.1f ops/frame %.1f us/op wave=%u %s=%llu\n",
+		            row.draw ? "draw" : "cs  ", static_cast<unsigned long long>(order[i].second),
+		            row.ms / frames, static_cast<double>(row.count) / frames,
+		            row.ms * 1000.0 / static_cast<double>(row.count), row.wave,
+		            row.draw ? "target" : "groups/op",
+		            row.draw ? static_cast<unsigned long long>(uint64_t {row.a} << 16u | row.b)
+		                     : static_cast<unsigned long long>(row.work / row.count));
+	}
+	std::fflush(stdout);
 }
 
 void CommandScheduler::WriteStartTimestamp() {

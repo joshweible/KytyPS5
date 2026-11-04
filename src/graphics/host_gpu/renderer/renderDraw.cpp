@@ -1226,6 +1226,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
+	m_context.GetCommandScheduler().ProfileMark(
+	    CommandScheduler::ProfileKind::Draw,
+	    state.ps_active ? state.ps_input_info.stage.module->info.shader_hash
+	                    : state.vertex_info[0].stage.module->info.shader_hash,
+	    rendering.width, rendering.height, 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 

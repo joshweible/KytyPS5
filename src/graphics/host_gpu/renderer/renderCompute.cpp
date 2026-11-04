@@ -48,7 +48,8 @@ void NoteDispatch(uint64_t hash, uint32_t x, uint32_t y, uint32_t z, uint64_t ti
 // KYTY_TIME_DISPATCHES=1: every dispatch finishes before the next starts, and slow ones are
 // reported. Tells one runaway dispatch from a batch that only adds up past the GPU watchdog.
 static void TimeDispatch(CommandScheduler& scheduler, uint64_t hash, uint32_t x, uint32_t y,
-                         uint32_t z) {
+                         uint32_t z, uint32_t wave) {
+	scheduler.ProfileMark(CommandScheduler::ProfileKind::Dispatch, hash, x * y, z, wave);
 	static const bool enabled = std::getenv("KYTY_TIME_DISPATCHES") != nullptr;
 	if (!enabled) return;
 	const auto start = std::chrono::steady_clock::now();
@@ -494,12 +495,13 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	const auto hash_for_timing = input_info.stage.module->info.shader_hash;
+	const auto wave_for_timing = input_info.stage.module->info.wave_size;
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, thread_group_x, thread_group_y,
-	             thread_group_z);
+	             thread_group_z, wave_for_timing);
 }
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
@@ -568,8 +570,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	const auto hash_for_timing = input_info.stage.module->info.shader_hash;
+	const auto wave_for_timing = input_info.stage.module->info.wave_size;
 	ResetBindings();
-	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, 0u, 0u, 0u);
+	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, 0u, 0u, 0u, wave_for_timing);
 }
 
 } // namespace Libs::Graphics
