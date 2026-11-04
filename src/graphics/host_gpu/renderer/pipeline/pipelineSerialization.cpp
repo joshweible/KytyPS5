@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/pipeline/spirvLoopGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "common/logging/log.h"
@@ -278,7 +279,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 				m_program_cache.erase(program);
 				return false;
 			}
-			module.module = CompileSPV(spirv, m_graphics.device);
+			module.module = CompileSPV(ApplyLoopGuard(module.info.shader_hash, spirv), m_graphics.device);
 			program->second.modules.push_back(std::move(module));
 			break;
 		}

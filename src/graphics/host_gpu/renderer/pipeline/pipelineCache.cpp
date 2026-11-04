@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/pipeline/spirvLoopGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/pipeline/computePipelineQueue.h"
@@ -343,7 +344,7 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
 	auto& module = program.modules.emplace_back(ShaderModule {
 	    .id             = id,
-	    .module         = CompileSPV(result.spirv, m_graphics.device),
+	    .module         = CompileSPV(ApplyLoopGuard(key.hash, result.spirv), m_graphics.device),
 	    .info           = std::move(info),
 	    .specialization = program.specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},

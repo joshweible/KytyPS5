@@ -27,6 +27,9 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <cstdlib>
+#include <cstdio>
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -41,6 +44,23 @@
 namespace Libs::Graphics {
 
 void NoteDispatch(uint64_t hash, uint32_t x, uint32_t y, uint32_t z, uint64_t tick);
+
+// KYTY_TIME_DISPATCHES=1: every dispatch finishes before the next starts, and slow ones are
+// reported. Tells one runaway dispatch from a batch that only adds up past the GPU watchdog.
+static void TimeDispatch(CommandScheduler& scheduler, uint64_t hash, uint32_t x, uint32_t y,
+                         uint32_t z) {
+	static const bool enabled = std::getenv("KYTY_TIME_DISPATCHES") != nullptr;
+	if (!enabled) return;
+	const auto start = std::chrono::steady_clock::now();
+	scheduler.Finish();
+	const auto ms =
+	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	if (ms >= 20.0) {
+		std::printf("dispatch-time: cs=%016llx groups=%ux%ux%u %.1f ms\n",
+		            static_cast<unsigned long long>(hash), x, y, z, ms);
+		std::fflush(stdout);
+	}
+}
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -457,13 +477,28 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	} else {
 		NoteDispatch(input_info.stage.module->info.shader_hash, thread_group_x, thread_group_y,
 		             thread_group_z, m_context.GetCommandScheduler().CurrentTick());
+		if (const char* dump = std::getenv("KYTY_DUMP_CS"); dump != nullptr &&
+		    std::strtoull(dump, nullptr, 16) == input_info.stage.module->info.shader_hash) {
+			const auto& flat = input_info.stage.resources->flattened_srt;
+			std::printf("dump-cs: groups=%ux%ux%u module=%016llx flat=%zu:", thread_group_x, thread_group_y,
+			            thread_group_z, static_cast<unsigned long long>(input_info.stage.module->id),
+			            flat.size());
+			for (size_t i = 0; i < std::min<size_t>(flat.size(), 48u); i++) {
+				std::printf(" %08x", flat[i]);
+			}
+			std::printf("\n");
+			std::fflush(stdout);
+		}
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	const auto hash_for_timing = input_info.stage.module->info.shader_hash;
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, thread_group_x, thread_group_y,
+	             thread_group_z);
 }
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
@@ -531,7 +566,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	const auto hash_for_timing = input_info.stage.module->info.shader_hash;
 	ResetBindings();
+	TimeDispatch(m_context.GetCommandScheduler(), hash_for_timing, 0u, 0u, 0u);
 }
 
 } // namespace Libs::Graphics
