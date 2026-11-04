@@ -1,10 +1,13 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
+#include "graphics/host_gpu/renderer/benchStats.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "common/assert.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
+#include <chrono>
 #include <algorithm>
 
 namespace Libs::Graphics {
@@ -62,12 +65,27 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
+	const bool timed = BenchStats::Enabled();
+	const auto now   = [timed] {
+		return timed ? static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())
+		             : uint64_t {0};
+	};
+	const auto start = now();
+	uint64_t   after_buffer = 0, after_texture = 0;
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		after_buffer = now();
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+		after_texture = now();
 		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		after_buffer = after_texture = now();
+	}
+	if (timed) {
+		BenchStats::NoteFault(fault_vaddr, access == PageFaultAccess::Write, GuestGpu::IsGpuThread(),
+		                      after_buffer - start, after_texture - after_buffer,
+		                      now() - after_texture);
 	}
 	return true;
 }

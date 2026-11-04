@@ -1,5 +1,6 @@
 #include "loader/runtimeLinker.h"
 
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
@@ -669,6 +670,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
+		Libs::Graphics::BenchStats::SetFaultPc(reinterpret_cast<uint64_t>(info->exception_address));
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			return true;

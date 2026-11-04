@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
+#include "graphics/host_gpu/renderer/benchStats.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -14,6 +15,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
+#include <chrono>
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
@@ -29,6 +31,10 @@ constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
 // GPU-modified ranges come as many small scattered islands, so a readback widens to a window.
 constexpr uint64_t DownloadWindowSize = 512 * 1024;
+// BenchStats: what the read in progress on this thread spent, set by DownloadBufferMemory.
+thread_local uint64_t t_read_wait_ns = 0;
+thread_local uint64_t t_read_copy_ns = 0;
+thread_local uint64_t t_read_bytes   = 0;
 
 std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandScheduler& scheduler,
                                         StreamBuffer& staging, uint64_t size, uint64_t alignment,
@@ -225,10 +231,18 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
-		const auto tick = m_scheduler.CurrentTick();
+		const auto clock = [] {
+			return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+		};
+		const auto begin = clock();
+		const auto tick  = m_scheduler.CurrentTick();
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
+		const auto waited = clock();
 		publish();
+		t_read_wait_ns += waited - begin;
+		t_read_copy_ns += clock() - waited;
+		t_read_bytes += total_size;
 	}
 	return true;
 }
@@ -296,7 +310,27 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	const auto clock = [] {
+		return static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+	};
+	const auto requested  = clock();
+	const bool gpu_thread = GuestGpu::IsGpuThread();
+	const auto fault_pc   = BenchStats::FaultPc();
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, requested,
+	                                                gpu_thread, clock, fault_pc] {
+		const auto started = clock();
+		BenchStats::SetFaultPc(fault_pc);
+		t_read_wait_ns = t_read_copy_ns = t_read_bytes = 0;
+		struct Report {
+			uint64_t vaddr, requested, started;
+			bool     is_write, gpu_thread;
+			~Report() {
+				if (BenchStats::Enabled()) {
+					BenchStats::NoteRead(vaddr, is_write, gpu_thread, started - requested,
+					                     t_read_wait_ns, t_read_copy_ns, t_read_bytes);
+				}
+			}
+		} report {vaddr, requested, started, is_write, gpu_thread};
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
