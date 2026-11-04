@@ -32,7 +32,7 @@ namespace {
 constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
 // GPU-modified ranges come as many small scattered islands, so a readback widens to a window.
-constexpr uint64_t DownloadWindowSize = 512 * 1024;
+constexpr uint64_t DownloadWindowSize = 64 * 1024;
 // BenchStats: what the read in progress on this thread spent, set by DownloadBufferMemory.
 thread_local uint64_t t_read_wait_ns = 0;
 thread_local uint64_t t_read_copy_ns = 0;
