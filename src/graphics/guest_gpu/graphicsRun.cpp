@@ -631,7 +631,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	auto       packet_from = std::chrono::steady_clock::now();
 	while (!execution.m_buffer_stack.empty()) {
 		m_renderer.GetBufferCache().EndPacket();
-		{
+		if (BenchStats::Enabled()) {
 			const auto now = std::chrono::steady_clock::now();
 			const auto packet_ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(now - packet_from).count());

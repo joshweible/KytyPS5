@@ -620,6 +620,10 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
                                     bool is_texel_buffer) {
+	// Nearly every binding has nothing to upload.
+	if (!is_written && !is_texel_buffer && !m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
+		return false;
+	}
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;

@@ -333,6 +333,7 @@ void NoteDispatchOverlap() {
 }
 
 void NoteImageLookup(bool known) {
+	if (!Enabled()) return;
 	(known ? g_image_known : g_image_searched).fetch_add(1u, std::memory_order_relaxed);
 }
 
@@ -371,6 +372,7 @@ void SetStageBank(uint32_t bank) {
 }
 
 void MarkStage(RecordStage stage) {
+	if (!Enabled()) return;
 	const auto now = std::chrono::steady_clock::now();
 	if (stage != StageNone) {
 		g_stage_ns[stage + t_stage_bank * RecordStages].fetch_add(

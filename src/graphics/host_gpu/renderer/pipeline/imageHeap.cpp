@@ -299,6 +299,11 @@ void ImageHeap::UpdateProbe(View& view, uint64_t probe) {
 	std::copy_n(words.begin() + offset,
 	            std::min<size_t>(view.profile.r128 ? 4u : 8u, words.size() - offset),
 	            value.dwords.begin());
+	// A table's changed range is wider than its changed descriptors.
+	if (const auto current = view.slots[offset]; current != 0u) {
+		const auto& element = m_elements[current & ElementMask];
+		if (!element.stale && element.value == value) return;
+	}
 	// A buried word stays null in every view until its descriptor changes.
 	auto& dead = view.memory.dead[offset];
 	if (dead != 0u && dead != DescriptorHash {}(value)) dead = 0u;
