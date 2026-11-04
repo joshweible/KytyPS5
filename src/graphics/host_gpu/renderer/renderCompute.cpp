@@ -477,7 +477,8 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	} else {
 		NoteDispatch(input_info.stage.module->info.shader_hash, thread_group_x, thread_group_y,
 		             thread_group_z, m_context.GetCommandScheduler().CurrentTick());
-		if (const char* dump = std::getenv("KYTY_DUMP_CS"); dump != nullptr &&
+		static const char* const dump = std::getenv("KYTY_DUMP_CS");
+		if (dump != nullptr &&
 		    std::strtoull(dump, nullptr, 16) == input_info.stage.module->info.shader_hash) {
 			const auto& flat = input_info.stage.resources->flattened_srt;
 			std::printf("dump-cs: groups=%ux%ux%u module=%016llx flat=%zu:", thread_group_x, thread_group_y,

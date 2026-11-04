@@ -822,6 +822,12 @@ bool TryEmulate(void* native_context) {
 	       TryEmulateCpuExtensions(context);
 }
 
+void CompleteLoad(void* native_context, size_t length, uint32_t value) {
+	Context context {static_cast<decltype(Context::native)>(native_context)};
+	context.Gpr(0) = value;
+	context.Advance(length);
+}
+
 void SkipLoad(void* native_context, size_t length) {
 	Context context {static_cast<decltype(Context::native)>(native_context)};
 	context.Gpr(0) = 0;

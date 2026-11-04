@@ -671,6 +671,19 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Unknown: return false;
 		}
 		Libs::Graphics::BenchStats::SetFaultPc(reinterpret_cast<uint64_t>(info->exception_address));
+		const auto rip = reinterpret_cast<uint64_t>(info->exception_address);
+		// The page holds GPU writes, but these bytes aren't among them: data the guest lays out
+		// next to GPU output would otherwise wait for work it has nothing to do with.
+		if (access == GpuAccess::Read) {
+			uint32_t word = 0;
+			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(rip);
+			    length != 0 && Libs::LibKernel::Memory::TryReadGpuCleanWord(
+			                       info->access_violation_vaddr, word)) {
+				Libs::Graphics::BenchStats::NoteCleanRead();
+				Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, word);
+				return true;
+			}
+		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			return true;

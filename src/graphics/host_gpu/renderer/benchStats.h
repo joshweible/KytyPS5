@@ -21,6 +21,7 @@ void NoteWriteKind(WriteKind kind); // The kind of write behind a read that had 
 // KYTY_SAMPLE_GPU=<start seconds> KYTY_SAMPLE_OUT=<path>: samples this thread's stack at 1 kHz
 // for ten seconds, for tools/sample_report.py.
 void SampleThisThread();
+void NoteCleanRead(); // A walker load served without the GPU from a page it wrote part of.
 void NoteWriter(bool finished); // Whether a dirty read's last writer had already completed.
 void SetFaultPc(uint64_t pc); // The faulting instruction, for the read this thread reports next.
 [[nodiscard]] uint64_t FaultPc();

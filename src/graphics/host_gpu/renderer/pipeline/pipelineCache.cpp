@@ -411,6 +411,22 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	m_lookup_key.hash            = params.hash;
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
+	// KYTY_DUMP_IR=<hash>:<file>: writes that shader's IR once.
+	static const char* const dump = std::getenv("KYTY_DUMP_IR");
+	if (dump != nullptr) {
+		static bool dumped = false;
+		if (!dumped && std::strtoull(dump, nullptr, 16) == params.hash) {
+			dumped                  = true;
+			options.shader_hash     = params.hash;
+			options.user_data       = user_data;
+			options.back_code       = params.back_code;
+			const auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+			if (FILE* file = std::fopen(std::strchr(dump, ':') + 1, "w")) {
+				std::fputs(ShaderRecompiler::IR::ProgramToString(translated.program).c_str(), file);
+				std::fclose(file);
+			}
+		}
+	}
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
