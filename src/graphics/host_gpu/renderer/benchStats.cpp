@@ -50,6 +50,7 @@ std::atomic<uint64_t> g_writer_pending {0};
 thread_local uint64_t t_fault_pc = 0;
 
 std::atomic<uint64_t> g_thread_ns[GpuThreadTimes];
+std::atomic<uint32_t> g_sync_packets[256];
 std::atomic<uint64_t> g_write_kinds[WriteKinds];
 std::atomic<uint64_t> g_clean_reads {0};
 std::atomic<uint64_t> g_gpu_events[GpuEvents];
@@ -105,11 +106,20 @@ void ReportReads(double frames) {
 	            "%.2f MiB/frame\n",
 	            per(total.count), per(total.empty), ms(total.queue), ms(total.wait),
 	            ms(total.copy), per(total.bytes) / (1024.0 * 1024.0));
-	std::printf("gpu-thread: idle=%.1f draw=%.1f dispatch=%.1f other=%.1f ms/frame\n",
+	std::printf("gpu-thread: idle=%.1f draw=%.1f dispatch=%.1f other=%.1f commands=%.1f ms/frame\n",
 	            static_cast<double>(g_thread_ns[GpuIdle].exchange(0)) * 1e-6 / frames,
 	            static_cast<double>(g_thread_ns[GpuDraw].exchange(0)) * 1e-6 / frames,
 	            static_cast<double>(g_thread_ns[GpuDispatch].exchange(0)) * 1e-6 / frames,
-	            static_cast<double>(g_thread_ns[GpuOther].exchange(0)) * 1e-6 / frames);
+	            static_cast<double>(g_thread_ns[GpuOther].exchange(0)) * 1e-6 / frames,
+	            static_cast<double>(g_thread_ns[GpuCommands].exchange(0)) * 1e-6 / frames);
+	std::printf("front-thread: active=%.1f wait=%.1f ms/frame\n",
+	            static_cast<double>(g_thread_ns[GpuFrontActive].exchange(0)) * 1e-6 / frames,
+	            static_cast<double>(g_thread_ns[GpuFrontWait].exchange(0)) * 1e-6 / frames);
+	for (uint32_t opcode = 0; opcode < 256u; opcode++) {
+		if (const auto count = g_sync_packets[opcode].exchange(0); count != 0u) {
+			std::printf("front-sync: 0x%02x %.1f/frame\n", opcode, per(count));
+		}
+	}
 	std::printf("read-kind: binding=%.1f fill=%.1f copy=%.1f image=%.1f /frame\n",
 	            per(g_write_kinds[WriteBinding].exchange(0)), per(g_write_kinds[WriteFill].exchange(0)),
 	            per(g_write_kinds[WriteCopy].exchange(0)), per(g_write_kinds[WriteImage].exchange(0)));
@@ -361,6 +371,10 @@ void NotePacket(uint32_t opcode, uint64_t ns) {
 	g_packet_buckets[bucket].ns.fetch_add(ns, std::memory_order_relaxed);
 	g_opcode_ns[opcode & 255u].fetch_add(ns, std::memory_order_relaxed);
 	g_opcode_count[opcode & 255u].fetch_add(1u, std::memory_order_relaxed);
+}
+
+void NoteSyncPacket(uint32_t opcode) {
+	g_sync_packets[opcode & 255u].fetch_add(1u, std::memory_order_relaxed);
 }
 
 void NoteLateWords(uint32_t count) {

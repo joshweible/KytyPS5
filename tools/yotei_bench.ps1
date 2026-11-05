@@ -46,7 +46,7 @@ function Read-Windows([string]$log) {
 New-Item -ItemType Directory -Force $Output | Out-Null
 $csv = Join-Path $Output 'bench-results.csv'
 if (-not (Test-Path $csv)) {
-	'time,label,run,commit,fps,min_fps,max_fps,frame_ms,gpu_busy_ms,gpu_gap_ms,gpu_wait_ms,compile_ms,create_ms,faults,submits,draws,dispatches,settle_s,status' | Set-Content $csv
+	'time,label,run,commit,fps,min_fps,max_fps,frame_ms,gpu_busy_ms,gpu_gap_ms,gpu_wait_ms,compile_ms,create_ms,faults,submits,draws,dispatches,settle_s,status,gpu_mhz' | Set-Content $csv
 }
 $commit = (git -C (Split-Path $exe) rev-parse --short HEAD 2>$null)
 
@@ -61,6 +61,7 @@ for ($run = 1; $run -le $Runs; $run++) {
 	$null = $process.Handle
 	$clock = [Diagnostics.Stopwatch]::StartNew()
 	$settled = -1
+	$clocks = New-Object System.Collections.ArrayList # The GPU can sit well below its usual clock.
 	$settle_time = 0
 	$status = 'timeout'
 	while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -77,6 +78,7 @@ for ($run = 1; $run -le $Runs; $run++) {
 			}
 			if ($settled -ge 0) { $settle_time = [int]$clock.Elapsed.TotalSeconds }
 		}
+		if ($settled -ge 0) { [void]$clocks.Add([int](& nvidia-smi --query-gpu=clocks.gr --format=csv,noheader,nounits)) }
 		if ($settled -ge 0 -and $all.Count -ge $settled + $Windows) { $status = 'ok'; break }
 	}
 	if ($Shot -and -not $process.HasExited) {
@@ -129,6 +131,7 @@ public static IntPtr Largest(uint process) {
 		    $fps, $range.Minimum, $range.Maximum, (1000 / $fps), (& $avg 'Busy'), (& $avg 'Gap'), (& $avg 'Wait'),
 		    (& $avg 'Compile'), (& $avg 'Create'), (& $avg 'Faults'), (& $avg 'Submits'), (& $avg 'Draws'),
 		    (& $avg 'Dispatches'), $settle_time
+		$line += ',{0:F0}' -f ($clocks | Measure-Object -Average).Average
 	} else {
 		$line += ",,,,,,,,,,,,,,$status"
 	}

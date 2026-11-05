@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -51,6 +52,32 @@ private:
 	bool                      m_made_progress = false;
 };
 
+// Everything a packet reads from the registers of its ring when it runs on the GPU thread.
+struct alignas(64) CpState {
+	HW::Context    ctx;
+	HW::UserConfig ucfg;
+	HW::Shader     sh;
+	uint32_t       index_type_and_size              = 0;
+	uint32_t       index_buffer_size                = 0;
+	uint64_t       index_base_addr                  = 0;
+	uint64_t       draw_indirect_args_base_addr     = 0;
+	uint64_t       dispatch_indirect_args_base_addr = 0;
+};
+
+// The cache lines of CpState that changed since the last packet of the ring. Few do, and on the
+// GPU thread each one is a miss on data another core just wrote.
+struct CpChanges {
+	static constexpr uint32_t LineSize = 64;
+	static constexpr uint32_t MaxLines = sizeof(CpState) / LineSize;
+
+	uint32_t count = 0;
+	std::array<uint16_t, MaxLines> lines;
+	alignas(LineSize) std::array<std::array<uint8_t, LineSize>, MaxLines> data;
+};
+
+// Each ring has two processors. The front one reads the packets and owns the live registers; the
+// back one runs packets on the GPU thread, with the registers as they stood at that packet. The
+// instance count belongs to the back processor, because indirect draws leave it there.
 class CommandProcessor {
 public:
 	CommandProcessor(RenderContext& renderer, int interrupt_event_id)
@@ -62,12 +89,18 @@ public:
 	void Reset();
 	void ApplyContextStateOperation(ContextStateOperation operation);
 
+	void               SetBack(CommandProcessor* back) { m_back = back; }
+	[[nodiscard]] auto Back() const { return m_back; }
+	void               SaveChanges(CpChanges& changes);
+	void               LoadChanges(const CpChanges& changes);
+	void               DispatchLookahead(std::span<const uint32_t> commands);
+
 	void            BufferInit();
 	void            BufferFlush();
 	void            BufferWait();
-	HW::Context&    GetCtx() { return m_ctx; }
-	HW::UserConfig& GetUcfg() { return m_ucfg; }
-	HW::Shader&     GetShCtx() { return m_sh_ctx; }
+	HW::Context&    GetCtx() { return m_state.ctx; }
+	HW::UserConfig& GetUcfg() { return m_state.ucfg; }
+	HW::Shader&     GetShCtx() { return m_state.sh; }
 
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
@@ -75,7 +108,7 @@ public:
 	void SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr);
 	void SetDispatchIndirectArgsBaseAddress(uint64_t dispatch_indirect_args_base_addr);
 	[[nodiscard]] uint64_t GetDispatchIndirectArgsBaseAddress() const {
-		return m_dispatch_indirect_args_base_addr;
+		return m_state.dispatch_indirect_args_base_addr;
 	}
 	void SetNumInstances(uint32_t num_instances);
 	void DrawIndex(DrawIndexArgs args);
@@ -117,7 +150,7 @@ public:
 
 private:
 	void ProcessPm4(Pm4Execution& execution);
-	void RunDispatchLookahead(const Pm4Execution& execution);
+	void RunDispatchLookahead(std::span<const uint32_t> commands);
 	void SuspendPm4();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;
@@ -125,15 +158,10 @@ private:
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
 
 	RenderContext& m_renderer;
-	HW::Context    m_ctx;
+	CommandProcessor* m_back = nullptr;
+	CpState        m_state;
+	CpState        m_sent; // What the back processor has been given.
 	std::optional<HW::Context> m_saved_ctx;
-	HW::UserConfig m_ucfg;
-	HW::Shader     m_sh_ctx;
-	uint32_t       m_index_type_and_size              = 0;
-	uint32_t       m_index_buffer_size                = 0;
-	uint64_t       m_index_base_addr                  = 0;
-	uint64_t       m_draw_indirect_args_base_addr     = 0;
-	uint64_t       m_dispatch_indirect_args_base_addr = 0;
 	// Persistent draw state. Indirect draws leave the address of their last instance count,
 	// read only when a later draw inherits it.
 	uint32_t m_num_instances      = 1;
